@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Telegram session
+*.session
+*.session-journal
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
