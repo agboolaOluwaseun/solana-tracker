@@ -11,6 +11,7 @@ _STATUS_BADGE = {
     "win": "🟢 WIN",
     "loss": "🔴 LOSS",
     "pending": "⏳ PENDING",
+    "unpriceable_loss": "⚫ UNPRICEABLE",
 }
 
 
@@ -59,7 +60,6 @@ def render() -> None:
                peak_profit_pct, is_win, status, week_index
         FROM calls
         WHERE channel_id = ?
-          AND status != 'unpriceable_loss'
     """
     params: list = [channel_id]
     if status_filter:

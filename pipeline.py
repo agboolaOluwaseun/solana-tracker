@@ -298,3 +298,132 @@ def run_backfill(
     progress.message = "backfill complete"
     progress_cb(progress)
     return progress
+
+
+def reprice_calls(
+    channel_id: int,
+    statuses: list[str] | None = None,
+    progress_cb: ProgressCb = _noop,
+) -> Progress:
+    """
+    Re-price calls for a channel that are in one of the given statuses.
+
+    Defaults to re-pricing both 'pending' and 'unpriceable_loss' calls —
+    useful when a backfill was interrupted (pending) or when transient API
+    errors marked tokens as unpriceable.
+
+    Does NOT re-fetch messages from Telegram — only re-prices existing rows.
+    """
+    if statuses is None:
+        statuses = ["pending", "unpriceable_loss"]
+
+    init_db()
+    progress = Progress(stage="price")
+    progress_cb(progress)
+
+    placeholders = ",".join("?" * len(statuses))
+    conn = get_connection()
+    rows = conn.execute(
+        f"SELECT id, message_id, token_address, token_symbol, call_timestamp "
+        f"FROM calls WHERE channel_id = ? AND status IN ({placeholders}) "
+        f"ORDER BY call_timestamp ASC",
+        [channel_id, *statuses],
+    ).fetchall()
+
+    progress.total_calls = len(rows)
+    progress_cb(progress)
+    if not rows:
+        progress.stage = "done"
+        progress.message = "no calls to re-price"
+        progress_cb(progress)
+        return progress
+
+    log.info("re-pricing %d calls for channel %d (statuses: %s)", len(rows), channel_id, statuses)
+
+    client = GeckoTerminalClient()
+    priced = 0
+    unpriceable = 0
+
+    for i, row in enumerate(rows, start=1):
+        addr = row["token_address"]
+        call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        try:
+            result = backtest_call(client, addr, call_ts)
+        except Exception as e:
+            log.exception("reprice backtest failed for call %s", row["id"])
+            from models import BacktestResult
+            result = BacktestResult(
+                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+                peak_profit_pct=None, is_win=False, status="unpriceable_loss",
+                error=str(e),
+            )
+        apply_backtest(channel_id, row["id"], row["message_id"], result)
+
+        if result.status == "unpriceable_loss":
+            unpriceable += 1
+            log.warning(
+                "[UNPRICEABLE] %s | %s | %s",
+                row["call_timestamp"],
+                row.get("token_symbol") or "?",
+                addr,
+            )
+        else:
+            priced += 1
+        progress.priced = priced
+        progress.unpriceable = unpriceable
+        progress.scanned = i
+        progress_cb(progress)
+
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO ingestion_runs
+                (channel_id, started_at, finished_at, mode, messages_scanned,
+                 calls_found, calls_priced, calls_unpriceable, status)
+            VALUES (?, ?, datetime('now'), 'reprice', 0, ?, ?, ?, 'completed')
+            """,
+            (
+                channel_id,
+                _iso(datetime.now(timezone.utc).replace(tzinfo=None)),
+                len(rows), priced, unpriceable,
+            ),
+        )
+
+    progress.stage = "done"
+    progress.message = f"re-priced {priced} calls ({unpriceable} still unpriceable)"
+    progress_cb(progress)
+    return progress
+
+
+def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
+    """
+    Delete all calls and ingestion runs for a channel.
+
+    If delete_channel=True, also removes the channel row itself.
+    Returns a summary dict with deletion counts.
+    """
+    init_db()
+    summary = {"calls_deleted": 0, "runs_deleted": 0, "channel_deleted": False}
+
+    with transaction() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM calls WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        summary["calls_deleted"] = count["n"] if count else 0
+        conn.execute("DELETE FROM calls WHERE channel_id = ?", (channel_id,))
+
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingestion_runs WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        summary["runs_deleted"] = count["n"] if count else 0
+        conn.execute("DELETE FROM ingestion_runs WHERE channel_id = ?", (channel_id,))
+
+        if delete_channel:
+            conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+            summary["channel_deleted"] = True
+
+    log.info(
+        "deleted channel %d data: %d calls, %d runs, channel=%s",
+        channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["channel_deleted"],
+    )
+    return summary
