@@ -80,3 +80,19 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     error             TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS stoploss_results (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id           INTEGER NOT NULL REFERENCES calls(id),
+    entry_price_usd   REAL,
+    peak_price_usd    REAL,
+    peak_timestamp    TEXT,
+    peak_profit_pct   REAL,
+    hit_stoploss      INTEGER NOT NULL DEFAULT 0,
+    stoploss_timestamp TEXT,
+    is_win            INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'pending',
+    error             TEXT,
+    computed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(call_id)
+);

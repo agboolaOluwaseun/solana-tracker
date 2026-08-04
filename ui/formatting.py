@@ -47,3 +47,15 @@ def fmt_multiplier(v, decimals: int = 1) -> str:
     if _is_blank(v):
         return "—"
     return f"{v:.{decimals}f}x"
+
+
+def fmt_ts(ts: str | None, max_len: int = 16) -> str:
+    """Truncate an ISO timestamp, e.g. '2026-04-16T02:54:40Z' -> '04-16 02:54'."""
+    if not ts:
+        return "—"
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(ts.replace("Z", ""))
+        return dt.strftime("%m-%d %H:%M" if max_len >= 11 else "%m-%d")
+    except (ValueError, TypeError):
+        return str(ts)[:max_len]

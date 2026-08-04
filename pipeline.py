@@ -684,3 +684,199 @@ def manual_override_call(
         "new_status": new_status,
         "channel_id": row["channel_id"],
     }
+
+
+# ── 50% Stop-Loss Strategy ──────────────────────────────────────────────────
+
+def run_stoploss_backtest(
+    channel_id: int | None = None,
+    progress_cb: ProgressCb = _noop,
+) -> Progress:
+    """
+    Run the 50% stop-loss strategy on all priced calls.
+
+    For each call, fetches hourly candles from Birdeye for the 7-day window,
+    then runs score_candles_stoploss(). If both the 2x target and 50% stop-loss
+    are hit in the same hour, fetches 1m candles for that specific hour to
+    resolve the exact chronological order.
+
+    Stores results in the stoploss_results table.
+    """
+    from pricing.birdeye import BirdeyeClient, BirdeyeError
+    from pricing.backtest import score_candles_stoploss
+
+    init_db()
+    init_stoploss_table()
+    progress = Progress(stage="price")
+    progress_cb(progress)
+
+    conn = get_connection()
+
+    if channel_id:
+        rows = conn.execute(
+            "SELECT id, token_address, token_symbol, call_timestamp, "
+            "entry_price_usd "
+            "FROM calls WHERE channel_id = ? AND status IN ('win','loss') "
+            "AND entry_price_usd IS NOT NULL "
+            "ORDER BY call_timestamp ASC",
+            (channel_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, token_address, token_symbol, call_timestamp, "
+            "entry_price_usd "
+            "FROM calls WHERE status IN ('win','loss') "
+            "AND entry_price_usd IS NOT NULL "
+            "ORDER BY call_timestamp ASC",
+        ).fetchall()
+
+    progress.total_calls = len(rows)
+    progress_cb(progress)
+    if not rows:
+        progress.stage = "done"
+        progress.message = "no priced calls to backtest"
+        progress_cb(progress)
+        return progress
+
+    log.info("stoploss backtest: %d calls to process", len(rows))
+    client = BirdeyeClient()
+    done = 0
+    errors = 0
+
+    for i, row in enumerate(rows, start=1):
+        call_id = row["id"]
+        addr = row["token_address"]
+        call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        window = settings.peak_window_hours
+        end_ts = call_ts + timedelta(hours=window)
+
+        # Check if already computed
+        existing = conn.execute(
+            "SELECT id FROM stoploss_results WHERE call_id = ?", (call_id,)
+        ).fetchone()
+        if existing:
+            done += 1
+            progress.scanned = i
+            progress.priced = done
+            progress_cb(progress)
+            continue
+
+        try:
+            # Fetch hourly candles for the full window
+            hour_candles = client.fetch_ohlcv(
+                addr, call_ts, end_ts, interval="1H",
+            )
+
+            # If both targets are hit in the same hour, fetch 1m candles for
+            # that hour to resolve the chronological order.
+            if hour_candles:
+                sorted_h = sorted(hour_candles, key=lambda c: c.timestamp)
+                entry = row["entry_price_usd"] or sorted_h[0].open
+                win_target = entry * 2.0
+                loss_threshold = entry * 0.5
+
+                ambiguous_hours = []
+                for c in sorted_h:
+                    if c.timestamp < call_ts:
+                        continue
+                    hit_win = c.high >= win_target
+                    hit_loss = c.low <= loss_threshold
+                    if hit_win and hit_loss:
+                        ambiguous_hours.append(c.timestamp)
+
+                # Fetch 1m candles for any ambiguous hours
+                minute_candles = []
+                for ambig_ts in ambiguous_hours:
+                    try:
+                        mc = client.fetch_ohlcv(
+                            addr, ambig_ts, ambig_ts + timedelta(hours=1),
+                            interval="1m",
+                        )
+                        minute_candles.extend(mc)
+                    except BirdeyeError:
+                        pass
+
+                all_candles = list(hour_candles) + minute_candles
+            else:
+                all_candles = []
+
+            result = score_candles_stoploss(
+                all_candles, call_ts, addr,
+                win_multiplier=2.0, stoploss_pct=50.0,
+            )
+
+            # Store result
+            conn.execute(
+                """INSERT INTO stoploss_results
+                (call_id, entry_price_usd, peak_price_usd, peak_timestamp,
+                 peak_profit_pct, hit_stoploss, stoploss_timestamp,
+                 is_win, status, error, computed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(call_id) DO UPDATE SET
+                entry_price_usd=excluded.entry_price_usd,
+                peak_price_usd=excluded.peak_price_usd,
+                peak_timestamp=excluded.peak_timestamp,
+                peak_profit_pct=excluded.peak_profit_pct,
+                hit_stoploss=excluded.hit_stoploss,
+                stoploss_timestamp=excluded.stoploss_timestamp,
+                is_win=excluded.is_win,
+                status=excluded.status,
+                error=excluded.error,
+                computed_at=datetime('now')""",
+                (
+                    call_id,
+                    result.entry_price_usd,
+                    result.peak_price_usd,
+                    _iso(result.peak_timestamp) if result.peak_timestamp else None,
+                    result.peak_profit_pct,
+                    1 if result.hit_stoploss else 0,
+                    _iso(result.stoploss_timestamp) if result.stoploss_timestamp else None,
+                    1 if result.is_win else 0,
+                    result.status,
+                    result.error,
+                ),
+            )
+            done += 1
+        except Exception as e:
+            log.exception("stoploss backtest failed for call %s", call_id)
+            conn.execute(
+                """INSERT INTO stoploss_results
+                (call_id, status, error, computed_at)
+                VALUES (?, 'unpriceable_loss', ?, datetime('now'))
+                ON CONFLICT(call_id) DO UPDATE SET
+                status='unpriceable_loss', error=?, computed_at=datetime('now')""",
+                (call_id, str(e), str(e)),
+            )
+            errors += 1
+
+        progress.scanned = i
+        progress.priced = done
+        progress.unpriceable = errors
+        progress_cb(progress)
+
+    progress.stage = "done"
+    progress.message = f"stoploss backtest: {done} done, {errors} errors"
+    progress_cb(progress)
+    return progress
+
+
+def init_stoploss_table() -> None:
+    """Create the stoploss_results table if it doesn't exist."""
+    conn = get_connection()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stoploss_results (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id           INTEGER NOT NULL REFERENCES calls(id),
+            entry_price_usd   REAL,
+            peak_price_usd    REAL,
+            peak_timestamp    TEXT,
+            peak_profit_pct   REAL,
+            hit_stoploss      INTEGER NOT NULL DEFAULT 0,
+            stoploss_timestamp TEXT,
+            is_win            INTEGER NOT NULL DEFAULT 0,
+            status            TEXT NOT NULL DEFAULT 'pending',
+            error             TEXT,
+            computed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(call_id)
+        )
+    """)

@@ -20,7 +20,7 @@ from typing import Optional
 
 from config import settings
 from db import transaction
-from models import BacktestResult
+from models import BacktestResult, StoplossResult
 from pricing.geckoterminal import GeckoTerminalClient, GeckoTerminalError
 
 log = logging.getLogger(__name__)
@@ -265,3 +265,104 @@ def score_candles(
         pool_address=pool_address or "unknown",
         candles_used=len(sorted_candles),
     )
+
+
+def score_candles_stoploss(
+    candles: list,
+    call_ts,
+    token_address: str,
+    pool_address: Optional[str] = None,
+    win_multiplier: float = 2.0,
+    stoploss_pct: float = 50.0,
+) -> StoplossResult:
+    """
+    Score a call using the 50% stop-loss strategy.
+    Chronologically tracks 1m candles to see if the win target (2x) or loss threshold (-50%) is hit first.
+    """
+    if not candles:
+        return StoplossResult(
+            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+            peak_profit_pct=None, hit_stoploss=False, stoploss_timestamp=None,
+            is_win=False, status="unpriceable_loss", pool_address=pool_address, error="no candles provided",
+        )
+
+    sorted_candles = sorted(candles, key=lambda c: c.timestamp)
+    
+    # Entry price
+    entry_price = None
+    for c in sorted_candles:
+        if c.timestamp <= call_ts < c.timestamp + timedelta(minutes=1):
+            entry_price = c.open
+            break
+    if entry_price is None:
+        for c in sorted_candles:
+            if c.timestamp <= call_ts:
+                entry_price = c.close
+        if entry_price is None and sorted_candles:
+            entry_price = sorted_candles[0].open
+            
+    if not entry_price or entry_price <= 0:
+        return StoplossResult(
+            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+            peak_profit_pct=None, hit_stoploss=False, stoploss_timestamp=None,
+            is_win=False, status="unpriceable_loss", pool_address=pool_address, error="zero entry price",
+        )
+
+    win_target = entry_price * win_multiplier
+    loss_threshold = entry_price * (1.0 - stoploss_pct / 100.0)
+    
+    hit_win = False
+    hit_loss = False
+    win_ts = None
+    loss_ts = None
+    max_price = entry_price
+    max_price_ts = call_ts
+    
+    for c in sorted_candles:
+        if c.timestamp < call_ts:
+            continue
+            
+        if c.high > max_price:
+            max_price = c.high
+            max_price_ts = c.timestamp
+            
+        if not hit_loss and c.low <= loss_threshold:
+            hit_loss = True
+            loss_ts = c.timestamp
+            
+        if not hit_win and c.high >= win_target:
+            hit_win = True
+            win_ts = c.timestamp
+            
+        # If both hit in the same candle, guess order based on candle direction
+        if hit_loss and hit_win and loss_ts == win_ts:
+            if c.close >= c.open:
+                hit_loss = False  # Green candle: went up then down
+            else:
+                hit_win = False   # Red candle: went down then up
+
+        if hit_win or hit_loss:
+            break
+
+    if hit_loss:
+        return StoplossResult(
+            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
+            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
+            hit_stoploss=True, stoploss_timestamp=loss_ts, is_win=False, status="loss",
+            pool_address=pool_address, candles_used=len(sorted_candles),
+        )
+    elif hit_win:
+        return StoplossResult(
+            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
+            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
+            hit_stoploss=False, stoploss_timestamp=None, is_win=True, status="win",
+            pool_address=pool_address, candles_used=len(sorted_candles),
+        )
+    else:
+        # Neither hit within the time window
+        return StoplossResult(
+            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
+            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
+            hit_stoploss=False, stoploss_timestamp=None, is_win=False, status="loss",
+            pool_address=pool_address, candles_used=len(sorted_candles),
+        )

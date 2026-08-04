@@ -26,7 +26,7 @@ import streamlit as st  # noqa: E402
 
 from config import settings  # noqa: E402
 from db import init_db, get_connection  # noqa: E402
-from ui.views import leaderboard, channel_deep_dive, call_log, manage, investigation  # noqa: E402
+from ui.views import leaderboard, channel_deep_dive, call_log, manage, investigation, stoploss  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────────────
 # Page config
@@ -539,11 +539,12 @@ def main() -> None:
         run_backfill_action(channel_ref.strip(), start_date, title=title_hint)
 
     # ── Tabs ──
-    tab_lb, tab_dd, tab_cl, tab_inv, tab_mg = st.tabs([
+    tab_lb, tab_dd, tab_cl, tab_inv, tab_sl, tab_mg = st.tabs([
         "🏆 Leaderboard",
         "🔎 Deep-Dive",
         "📋 Call Log",
         "🔬 Investigate",
+        "📉 Stop-Loss",
         "⚙️ Manage",
     ])
     with tab_lb:
@@ -554,6 +555,8 @@ def main() -> None:
         call_log.render()
     with tab_inv:
         investigation.render()
+    with tab_sl:
+        stoploss.render()
     with tab_mg:
         manage.render()
 

@@ -59,6 +59,22 @@ class BacktestResult:
 
 
 @dataclass
+class StoplossResult:
+    """The outcome of pricing one call using the 50% stop-loss strategy."""
+    entry_price_usd: Optional[float]
+    peak_price_usd: Optional[float]         # Max price reached BEFORE stop-loss (if loss) or overall (if win)
+    peak_timestamp: Optional[datetime]
+    peak_profit_pct: Optional[float]        # (peak/entry - 1) * 100
+    hit_stoploss: bool                      # True if price dropped 50% before hitting 2x
+    stoploss_timestamp: Optional[datetime]  # When the 50% drop occurred
+    is_win: bool                            # True if hit 2x before 50% drop
+    status: str                             # win|loss|unpriceable_loss
+    pool_address: Optional[str] = None
+    candles_used: int = 0
+    error: Optional[str] = None
+
+
+@dataclass
 class ChannelStats:
     """Aggregate metrics for one channel over the window."""
     channel_id: int
