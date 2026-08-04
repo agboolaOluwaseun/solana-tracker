@@ -19,12 +19,18 @@ from typing import Callable, Optional
 from config import settings
 from db import get_connection, init_db, transaction
 from ingestion.address_parser import deduplicate_calls, parse_message
-from ingestion.telethon_fetcher import fetch_window_sync
 from models import WeekBuckets
 from pricing.backtest import backtest_call, upsert_token_meta
 from pricing.geckoterminal import GeckoTerminalClient
 
 log = logging.getLogger(__name__)
+
+
+def _import_fetch_window_sync():
+    """Lazy import — telethon_fetcher requires the telethon package which
+    may not be installed for UI-only usage (investigation, manage, etc)."""
+    from ingestion.telethon_fetcher import fetch_window_sync
+    return fetch_window_sync
 
 
 @dataclass
@@ -166,6 +172,7 @@ def run_backfill(
             progress.scanned = n
             progress_cb(progress)
 
+        fetch_window_sync = _import_fetch_window_sync()
         fetched = fetch_window_sync(
             channel_ref,
             window_start,
@@ -427,3 +434,253 @@ def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
         channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["channel_deleted"],
     )
     return summary
+
+
+def delete_calls_by_status(channel_id: int, statuses: list[str]) -> dict:
+    """
+    Delete calls for a channel that match specific statuses.
+
+    Useful for clearing only losses, pending, or unpriceable calls while keeping wins.
+    Returns a summary dict with deletion count.
+    """
+    init_db()
+    summary = {"calls_deleted": 0}
+
+    if not statuses:
+        return summary
+
+    placeholders = ",".join("?" * len(statuses))
+    with transaction() as conn:
+        count = conn.execute(
+            f"SELECT COUNT(*) AS n FROM calls WHERE channel_id = ? AND status IN ({placeholders})",
+            [channel_id, *statuses],
+        ).fetchone()
+        summary["calls_deleted"] = count["n"] if count else 0
+        conn.execute(
+            f"DELETE FROM calls WHERE channel_id = ? AND status IN ({placeholders})",
+            [channel_id, *statuses],
+        )
+
+    log.info(
+        "deleted %d calls for channel %d (statuses: %s)",
+        summary["calls_deleted"], channel_id, statuses,
+    )
+    return summary
+
+
+# ── Birdeye pricing for unpriceable calls ───────────────────────────────────
+
+def reprice_with_birdeye(
+    channel_id: int,
+    call_ids: list[int] | None = None,
+    progress_cb: ProgressCb = _noop,
+) -> Progress:
+    """
+    Re-price unpriceable (or pending) calls using Birdeye's OHLCV API.
+
+    If call_ids is None, prices ALL unpriceable_loss calls for the channel.
+    If call_ids is provided, only prices those specific call rows.
+    """
+    from pricing.birdeye import BirdeyeClient, BirdeyeError
+    from pricing.backtest import score_candles
+    from models import BacktestResult
+
+    init_db()
+    progress = Progress(stage="price")
+    progress_cb(progress)
+
+    conn = get_connection()
+
+    if call_ids:
+        placeholders = ",".join("?" * len(call_ids))
+        rows = conn.execute(
+            f"SELECT id, message_id, token_address, call_timestamp "
+            f"FROM calls WHERE id IN ({placeholders}) "
+            f"ORDER BY call_timestamp ASC",
+            call_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, message_id, token_address, call_timestamp FROM calls "
+            "WHERE channel_id = ? AND status = 'unpriceable_loss' "
+            "ORDER BY call_timestamp ASC",
+            (channel_id,),
+        ).fetchall()
+
+    progress.total_calls = len(rows)
+    progress_cb(progress)
+    if not rows:
+        progress.stage = "done"
+        progress.message = "no calls to re-price with Birdeye"
+        progress_cb(progress)
+        return progress
+
+    client = BirdeyeClient()
+    priced = 0
+    unpriceable = 0
+
+    for i, row in enumerate(rows, start=1):
+        addr = row["token_address"]
+        call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        end_ts = call_ts + timedelta(hours=settings.peak_window_hours)
+
+        try:
+            # Fetch minute candles for entry price (tight window)
+            minute_candles = client.fetch_ohlcv(
+                addr,
+                call_ts - timedelta(minutes=5),
+                call_ts + timedelta(minutes=10),
+                interval="1m",
+            )
+            # Fetch hourly candles for 7-day peak scan
+            hour_candles = client.fetch_ohlcv(
+                addr,
+                call_ts,
+                end_ts,
+                interval="1H",
+            )
+        except BirdeyeError as e:
+            log.warning("Birdeye pricing failed for %s: %s", addr[:12] + "…", e)
+            result = BacktestResult(
+                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+                peak_profit_pct=None, is_win=False, status="unpriceable_loss",
+                error=f"Birdeye: {e}",
+            )
+            unpriceable += 1
+            conn.execute(
+                "UPDATE calls SET status='unpriceable_loss', priced_at=datetime('now') "
+                "WHERE id = ?",
+                (row["id"],),
+            )
+            progress.unpriceable = unpriceable
+            progress.priced = priced
+            progress.scanned = i
+            progress_cb(progress)
+            continue
+
+        # Score using the same logic as GeckoTerminal backtest
+        all_candles = list(minute_candles) + list(hour_candles)
+        result = score_candles(all_candles, call_ts, addr)
+
+        conn.execute(
+            """UPDATE calls SET
+                pool_address = ?,
+                entry_price_usd = ?,
+                peak_price_usd = ?,
+                peak_timestamp = ?,
+                peak_profit_pct = ?,
+                is_win = ?,
+                status = ?,
+                priced_at = datetime('now')
+            WHERE id = ?""",
+            (
+                result.pool_address or "birdeye",
+                result.entry_price_usd,
+                result.peak_price_usd,
+                _iso(result.peak_timestamp) if result.peak_timestamp else None,
+                result.peak_profit_pct,
+                1 if result.is_win else 0,
+                result.status,
+                row["id"],
+            ),
+        )
+
+        if result.status == "unpriceable_loss":
+            unpriceable += 1
+        else:
+            priced += 1
+
+        progress.priced = priced
+        progress.unpriceable = unpriceable
+        progress.scanned = i
+        progress_cb(progress)
+
+    # Record run
+    with transaction() as c:
+        c.execute(
+            """INSERT INTO ingestion_runs
+                (channel_id, started_at, finished_at, mode, messages_scanned,
+                 calls_found, calls_priced, calls_unpriceable, status)
+            VALUES (?, ?, datetime('now'), 'birdeye_reprice', 0, ?, ?, ?, 'completed')""",
+            (
+                channel_id,
+                _iso(datetime.now(timezone.utc).replace(tzinfo=None)),
+                len(rows), priced, unpriceable,
+            ),
+        )
+
+    progress.stage = "done"
+    progress.message = f"Birdeye re-price: {priced} priced, {unpriceable} still unpriceable"
+    progress_cb(progress)
+    return progress
+
+
+# ── Manual status override ──────────────────────────────────────────────────
+
+def manual_override_call(
+    call_id: int,
+    new_status: str,
+    entry_price: Optional[float] = None,
+    peak_price: Optional[float] = None,
+    peak_profit_pct: Optional[float] = None,
+    note: Optional[str] = None,
+) -> dict:
+    """
+    Manually override a call's status and optional pricing fields.
+
+    new_status must be one of: 'win', 'loss', 'pending', 'unpriceable_loss'.
+    When setting win/loss, entry_price and peak_price should be provided so
+    the win rate math works correctly.
+
+    Returns a summary dict with the old and new status.
+    """
+    valid_statuses = {"win", "loss", "pending", "unpriceable_loss"}
+    if new_status not in valid_statuses:
+        raise ValueError(f"Invalid status '{new_status}'. Must be one of: {valid_statuses}")
+
+    init_db()
+    conn = get_connection()
+
+    # Fetch current row
+    row = conn.execute(
+        "SELECT id, status, token_address, call_timestamp, channel_id FROM calls WHERE id = ?",
+        (call_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"Call ID {call_id} not found in database")
+
+    old_status = row["status"]
+    is_win = 1 if new_status == "win" else 0
+
+    with transaction() as c:
+        c.execute(
+            """UPDATE calls SET
+                status = ?,
+                is_win = ?,
+                entry_price_usd = COALESCE(?, entry_price_usd),
+                peak_price_usd = COALESCE(?, peak_price_usd),
+                peak_profit_pct = COALESCE(?, peak_profit_pct),
+                priced_at = datetime('now')
+            WHERE id = ?""",
+            (
+                new_status,
+                is_win,
+                entry_price,
+                peak_price,
+                peak_profit_pct,
+                call_id,
+            ),
+        )
+
+    log.info(
+        "Manual override: call %s (%s) %s → %s",
+        call_id, row["token_address"][:10] + "…", old_status, new_status,
+    )
+
+    return {
+        "call_id": call_id,
+        "token_address": row["token_address"],
+        "old_status": old_status,
+        "new_status": new_status,
+        "channel_id": row["channel_id"],
+    }

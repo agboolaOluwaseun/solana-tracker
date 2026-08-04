@@ -189,3 +189,79 @@ def backtest_call(
         pool_address=pool_address,
         candles_used=len(all_candles),
     )
+
+
+def score_candles(
+    candles: list,
+    call_ts,
+    token_address: str,
+    pool_address: Optional[str] = None,
+) -> BacktestResult:
+    """
+    Score a call using a pre-fetched list of candles (from any source).
+
+    This is the shared scoring logic used by both GeckoTerminal and Birdeye
+    backtest paths. `candles` should be a list of PricePoint objects.
+    """
+    if not candles:
+        return BacktestResult(
+            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+            peak_profit_pct=None, is_win=False, status="unpriceable_loss",
+            pool_address=pool_address, error="no candles provided",
+        )
+
+    sorted_candles = sorted(candles, key=lambda c: c.timestamp)
+
+    # Entry: find the candle containing call_ts, use its open.
+    # Try 1-minute candles first (most precise), then fall back to oldest candle.
+    entry_price: Optional[float] = None
+    
+    # First pass: look for a candle whose 1-min window contains call_ts
+    # (works for 1m candles from either GeckoTerminal or Birdeye).
+    for c in sorted_candles:
+        if c.timestamp <= call_ts < c.timestamp + timedelta(minutes=1):
+            entry_price = c.open
+            break
+    
+    # Second pass: if no 1m match, look for a candle whose wider window
+    # contains call_ts (e.g. an hourly candle).  Use the candle's open.
+    if entry_price is None:
+        for c in sorted_candles:
+            # Check the next candle's start to estimate this candle's end.
+            idx = sorted_candles.index(c)
+            if idx + 1 < len(sorted_candles):
+                next_start = sorted_candles[idx + 1].timestamp
+            else:
+                next_start = call_ts + timedelta(hours=1)
+            if c.timestamp <= call_ts < next_start:
+                entry_price = c.open
+                break
+
+    # Fallback: use oldest candle's open.
+    if entry_price is None:
+        entry_price = sorted_candles[0].open
+
+    if not entry_price or entry_price <= 0:
+        return BacktestResult(
+            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+            peak_profit_pct=None, is_win=False, status="unpriceable_loss",
+            pool_address=pool_address, error="zero entry price",
+        )
+
+    # Peak: max high across all candles.
+    peak_candle = max(sorted_candles, key=lambda c: c.high)
+    peak = peak_candle.high
+    peak_profit_pct = (peak / entry_price - 1.0) * 100.0
+    is_win = peak >= settings.win_multiplier * entry_price
+    status = "win" if is_win else "loss"
+
+    return BacktestResult(
+        entry_price_usd=entry_price,
+        peak_price_usd=peak,
+        peak_timestamp=peak_candle.timestamp,
+        peak_profit_pct=peak_profit_pct,
+        is_win=is_win,
+        status=status,
+        pool_address=pool_address or "unknown",
+        candles_used=len(sorted_candles),
+    )

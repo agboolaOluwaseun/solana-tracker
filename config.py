@@ -49,6 +49,9 @@ class Settings:
     # GeckoTerminal Solana network id.
     solana_network: str = "solana"
 
+    # Birdeye (alternative pricing source)
+    birdeye_api_key: str = field(default_factory=lambda: os.getenv("BIRDEYE_API_KEY", ""))
+
     # Rate limits (requests per minute). Free public API ~= 30, paid ~= 250.
     # We deliberately stay a touch below the ceiling to avoid 429s.
     free_rpm: int = 28

@@ -26,7 +26,7 @@ import streamlit as st  # noqa: E402
 
 from config import settings  # noqa: E402
 from db import init_db, get_connection  # noqa: E402
-from ui.views import leaderboard, channel_deep_dive, call_log, manage  # noqa: E402
+from ui.views import leaderboard, channel_deep_dive, call_log, manage, investigation  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────────────
 # Page config
@@ -251,7 +251,7 @@ def _db_pending_count() -> int:
 # ──────────────────────────────────────────────────────────────────────────
 # Backfill action (unchanged logic, styled)
 # ──────────────────────────────────────────────────────────────────────────
-def run_backfill_action(channel_ref: str, start_date, title: str = None) -> None:
+def run_backfill_action(channel_ref: str, start_date, title: str | None = None) -> None:
     """Trigger a backfill inline, streaming progress to the UI."""
     from pipeline import Progress, run_backfill
 
@@ -376,8 +376,8 @@ def run_delete_action(channel_id: int, channel_name: str, delete_channel: bool) 
 # ──────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────────────────────────────────
-def _render_sidebar() -> tuple[str | None, object, bool]:
-    """Render sidebar, return (channel_ref, start_date, run_btn_clicked)."""
+def _render_sidebar() -> tuple[str | None, object, bool, str | None]:
+    """Render sidebar, return (channel_ref, start_date, run_btn_clicked, title_hint)."""
     with st.sidebar:
         # ── Settings ──
         st.markdown("### ⚙️ Settings")
@@ -539,10 +539,11 @@ def main() -> None:
         run_backfill_action(channel_ref.strip(), start_date, title=title_hint)
 
     # ── Tabs ──
-    tab_lb, tab_dd, tab_cl, tab_mg = st.tabs([
+    tab_lb, tab_dd, tab_cl, tab_inv, tab_mg = st.tabs([
         "🏆 Leaderboard",
         "🔎 Deep-Dive",
         "📋 Call Log",
+        "🔬 Investigate",
         "⚙️ Manage",
     ])
     with tab_lb:
@@ -551,6 +552,8 @@ def main() -> None:
         channel_deep_dive.render()
     with tab_cl:
         call_log.render()
+    with tab_inv:
+        investigation.render()
     with tab_mg:
         manage.render()
 
