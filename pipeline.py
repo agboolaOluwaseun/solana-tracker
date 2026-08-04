@@ -690,6 +690,7 @@ def manual_override_call(
 
 def run_stoploss_backtest(
     channel_id: int | None = None,
+    limit: int | None = None,
     progress_cb: ProgressCb = _noop,
 ) -> Progress:
     """
@@ -713,22 +714,29 @@ def run_stoploss_backtest(
     conn = get_connection()
 
     if channel_id:
-        rows = conn.execute(
+        query = (
             "SELECT id, token_address, token_symbol, call_timestamp, "
             "entry_price_usd "
             "FROM calls WHERE channel_id = ? AND status IN ('win','loss') "
             "AND entry_price_usd IS NOT NULL "
-            "ORDER BY call_timestamp ASC",
-            (channel_id,),
-        ).fetchall()
+            "ORDER BY call_timestamp ASC"
+        )
+        params: list = [channel_id]
     else:
-        rows = conn.execute(
+        query = (
             "SELECT id, token_address, token_symbol, call_timestamp, "
             "entry_price_usd "
             "FROM calls WHERE status IN ('win','loss') "
             "AND entry_price_usd IS NOT NULL "
-            "ORDER BY call_timestamp ASC",
-        ).fetchall()
+            "ORDER BY call_timestamp ASC"
+        )
+        params = []
+
+    if limit:
+        query += " LIMIT ?"
+        params.append(int(limit))
+
+    rows = conn.execute(query, params).fetchall()
 
     progress.total_calls = len(rows)
     progress_cb(progress)
