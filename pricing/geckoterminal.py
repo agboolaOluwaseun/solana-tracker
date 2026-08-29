@@ -66,7 +66,7 @@ class GeckoTerminalClient:
         if settings.geckoterminal_api_key:
             self.session.headers["x-cg-pro-api-key"] = settings.geckoterminal_api_key
         rpm = requests_per_minute or settings.requests_per_minute
-        self.limiter = RateLimiter(rpm)
+        self.limiter = RateLimiter(rpm, safety_margin=settings.rate_limit_safety_margin)
 
     # ---- internals ---------------------------------------------------------
 
@@ -88,13 +88,30 @@ class GeckoTerminalClient:
 
                 # Retryable Cloudflare / server conditions.
                 if resp.status_code in (429, 403) or resp.status_code >= 500:
-                    retry_after = _parse_retry_after(resp)
-                    if retry_after:
+                    # 429 = origin rate limited. Feed it back to the circuit
+                    # breaker so ALL subsequent acquires block during the
+                    # cooldown — this prevents hammering the window boundary.
+                    if resp.status_code == 429:
+                        retry_after = _parse_retry_after(resp)
+                        self.limiter.notify_throttled(retry_after)
                         log.info(
-                            "HTTP %s on %s — honoring Retry-After %ss",
-                            resp.status_code, path, retry_after,
+                            "HTTP 429 on %s — circuit breaker cooldown engaged "
+                            "(target now %s RPM)", path, self.limiter.target_rpm,
                         )
-                        time.sleep(min(retry_after, 60))
+                        # Let the breaker's cooldown gate the next attempt; the
+                        # tenacity wait is a secondary floor. Sleep a bounded
+                        # amount so the outer retry loop doesn't spin hot.
+                        time.sleep(min(max(retry_after or 0, 5.0), 30.0))
+                    elif resp.status_code == 403:
+                        # Cloudflare bot/JS challenge — NOT a plain rate limit.
+                        # Retrying immediately worsens it; back off conservatively.
+                        retry_after = _parse_retry_after(resp)
+                        self.limiter.notify_throttled(retry_after)
+                        log.warning("HTTP 403 (Cloudflare) on %s — backing off", path)
+                        time.sleep(min(max(retry_after or 0, 20.0), 60.0))
+                    else:
+                        # 5xx — transient server error; tenacity backoff handles it.
+                        time.sleep(2.0)
                     raise _RetryableAPIError(
                         f"HTTP {resp.status_code} from {path}: {resp.text[:200]}"
                     )
@@ -104,6 +121,8 @@ class GeckoTerminalClient:
                     raise GeckoTerminalError(
                         f"HTTP {resp.status_code} from {path}: {resp.text[:200]}"
                     )
+                # Healthy response — tell the limiter so it can de-escalate.
+                self.limiter.notify_success()
                 return resp.json()
         raise GeckoTerminalError("retry loop exited without a value")
 
@@ -226,62 +245,107 @@ class GeckoTerminalClient:
         agg_minutes_for_cache = {"minute": 1, "hour": 60, "day": 1440}.get(aggregate, 60)
         cached = cache_mod.load_candles(pool_address, token_address, start, end)
         expected = max(1, int((end - start).total_seconds() // 60 // agg_minutes_for_cache))
-        if len(cached) >= int(expected * 0.8):
+        
+        # Determine what spans are missing from the cache.
+        # We need FULL coverage [start, end) — partial coverage (missing head OR tail)
+        # would score entry/peak incorrectly.
+        # Identify the gaps and fetch ONLY the missing spans, then merge.
+        if cached:
+            cached_start = cached[0].timestamp
+            cached_end = cached[-1].timestamp + timedelta(minutes=agg_minutes_for_cache)
+            # Leading gap: cache doesn't cover the window start
+            leading_gap = cached_start > start + timedelta(minutes=agg_minutes_for_cache)
+            # Trailing gap: cache doesn't cover the window end
+            trailing_gap = cached_end < end - timedelta(minutes=agg_minutes_for_cache)
+        else:
+            leading_gap = True
+            trailing_gap = True
+        
+        if not leading_gap and not trailing_gap and len(cached) >= expected:
+            # Full coverage — use cache as-is
             return _fill_and_sort(cached, start, end)
-
-        # 2. Fetch from API in chunks of up to 1000 candles.
-        #    IMPORTANT: GeckoTerminal anchors results to before_timestamp and
-        #    returns the NEWEST `limit` candles in the window — if the window
-        #    holds more candles than the limit, the OLDEST (call-time!) candles
-        #    get silently dropped. So each chunk must span FEWER candles than
-        #    the limit (900 < 1000) to guarantee full coverage from the start.
+        
+        # Partial coverage — fetch ONLY the missing spans and merge with cached data.
+        # This avoids re-fetching the full 12h window when only a tail gap exists.
+        fetched: List[PricePoint] = []
         max_candle = 1000
         agg_minutes = {"minute": 1, "hour": 60, "day": 1440}.get(aggregate, 60)
         chunk_duration = timedelta(minutes=900 * agg_minutes)
-        fetched: List[PricePoint] = []
-        chunk_start = start
         safety = 0
         last_err = None
-        while chunk_start < end and safety < 40:
-            safety += 1
-            chunk_end = min(end, chunk_start + chunk_duration)
-            params = {
-                "before_timestamp": int(chunk_end.replace(tzinfo=timezone.utc).timestamp()),
-                "after_timestamp": int(chunk_start.replace(tzinfo=timezone.utc).timestamp()),
-                "limit": max_candle,
-                "currency": "usd",
-            }
-            data = None
-            for agg in aggregate_candidates:
-                path = f"/networks/{self.network}/pools/{pool_address}/ohlcv/{agg}"
-                try:
-                    data = self._request(path, params=params)
-                    break  # success
-                except GeckoTerminalError as e:
-                    last_err = e
-                    msg = str(e)
-                    # Only retry on aggregate-validation errors, not real 404s.
-                    if "Invalid" in msg and ("aggregate" in msg or "timeframe" in msg):
-                        continue
-                    else:
-                        break  # different error, stop trying aggregates
-            if data is None:
-                log.warning("ohlcv fetch failed for pool %s: %s", pool_address, last_err)
-                break
+        
+        def _fetch_span(span_start, span_end):
+            """Fetch a single contiguous span from the API."""
+            nonlocal safety, last_err
+            span_fetched: List[PricePoint] = []
+            chunk_start = span_start
+            while chunk_start < span_end and safety < 40:
+                safety += 1
+                chunk_end = min(span_end, chunk_start + chunk_duration)
+                params = {
+                    "before_timestamp": int(chunk_end.replace(tzinfo=timezone.utc).timestamp()),
+                    "after_timestamp": int(chunk_start.replace(tzinfo=timezone.utc).timestamp()),
+                    "limit": max_candle,
+                    "currency": "usd",
+                }
+                data = None
+                for agg in aggregate_candidates:
+                    path = f"/networks/{self.network}/pools/{pool_address}/ohlcv/{agg}"
+                    try:
+                        data = self._request(path, params=params)
+                        break
+                    except GeckoTerminalError as e:
+                        last_err = e
+                        msg = str(e)
+                        if "Invalid" in msg and ("aggregate" in msg or "timeframe" in msg):
+                            continue
+                        else:
+                            break
+                if data is None:
+                    log.warning("ohlcv fetch failed for pool %s: %s", pool_address, last_err)
+                    break
+                candles = _parse_ohlcv(data)
+                if not candles:
+                    break
+                span_fetched.extend(candles)
+                latest = max(c.timestamp for c in candles)
+                if latest <= chunk_start:
+                    break
+                chunk_start = latest + timedelta(minutes=agg_minutes)
+            return span_fetched
+        
+        # Fetch leading gap (if any)
+        if leading_gap:
+            if cached:
+                fetched.extend(_fetch_span(start, min(cached[0].timestamp, end)))
+            else:
+                fetched.extend(_fetch_span(start, end))
 
-            candles = _parse_ohlcv(data)
-            if not candles:
-                break
-            fetched.extend(candles)
-            latest = max(c.timestamp for c in candles)
-            if latest <= chunk_start:
-                break
-            chunk_start = latest + timedelta(minutes=agg_minutes)
-
+        # Fetch trailing gap (if any)
+        if trailing_gap:
+            if cached:
+                gap_start = cached[-1].timestamp + timedelta(minutes=agg_minutes)
+                if gap_start < end:
+                    fetched.extend(_fetch_span(gap_start, end))
+            else:
+                # Already fetched full span above
+                pass
+        
+        # Merge: combine cached + newly fetched, dedupe by timestamp, sort
+        all_candles = list(cached) + fetched
+        seen_ts = set()
+        merged = []
+        for c in sorted(all_candles, key=lambda x: x.timestamp):
+            ts_key = c.timestamp.replace(microsecond=0)
+            if ts_key not in seen_ts:
+                seen_ts.add(ts_key)
+                merged.append(c)
+        
+        # Store the newly fetched candles to cache (cached ones already there)
         if fetched:
             cache_mod.store_candles(pool_address, token_address, fetched)
-
-        return _fill_and_sort(fetched, start, end)
+        
+        return _fill_and_sort(merged, start, end)
 
 
 # ---- module-level helpers ---------------------------------------------------

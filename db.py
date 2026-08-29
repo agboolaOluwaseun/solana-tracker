@@ -53,3 +53,8 @@ def init_db() -> None:
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     conn = get_connection()
     conn.executescript(schema)
+    # Guarded migration for pre-existing DBs: CREATE TABLE IF NOT EXISTS does
+    # not add columns to a table that already exists.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(calls)").fetchall()}
+    if "pending_reason" not in cols:
+        conn.execute("ALTER TABLE calls ADD COLUMN pending_reason TEXT")

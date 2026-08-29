@@ -34,6 +34,25 @@ def _session_path() -> str:
     return str(PROJECT_ROOT / settings.session_name)
 
 
+async def _resolve_entity(client: TelegramClient, channel: str):
+    """Resolve a channel ref to an entity.
+
+    '@username' resolves directly. A bare numeric string is a Telegram
+    channel/group id — Telethon's get_entity would treat it as a username
+    and fail, so private channels (no username) must be resolved via
+    PeerChannel/PeerChat, which uses the session's entity cache (warmed
+    by iter_dialogs in the UI flows).
+    """
+    if channel.lstrip("-").isdigit():
+        from telethon.tl.types import PeerChannel, PeerChat
+        peer_id = int(channel)
+        try:
+            return await client.get_entity(PeerChannel(peer_id))
+        except Exception:
+            return await client.get_entity(PeerChat(peer_id))
+    return await client.get_entity(channel)
+
+
 def build_client() -> TelegramClient:
     """Construct an un-started TelegramClient."""
     return TelegramClient(
@@ -84,7 +103,7 @@ async def fetch_window(
     scanned = 0
     channel_title: Optional[str] = None
     try:
-        entity = await client.get_entity(channel)
+        entity = await _resolve_entity(client, channel)
         # Capture the channel's display title for the leaderboard/UI.
         channel_title = getattr(entity, "title", None)
         # IMPORTANT: do NOT combine offset_date with reverse=True — Telethon's

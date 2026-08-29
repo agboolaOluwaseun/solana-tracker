@@ -1,0 +1,1 @@
+"""Local read-only API package for the Next.js frontend."""

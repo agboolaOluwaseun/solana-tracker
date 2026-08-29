@@ -37,7 +37,7 @@ def leaderboard_frame() -> pd.DataFrame:
                MAX(cal.peak_profit_pct) AS best_peak_profit_pct
         FROM channels c
         LEFT JOIN calls cal ON cal.channel_id = c.id
-            AND cal.status != 'unpriceable_loss'
+            AND cal.status NOT IN ('unpriceable_loss', 'excluded')
         GROUP BY c.id
         """
     ).fetchall()
@@ -74,7 +74,7 @@ def channel_detail(channel_id: int) -> dict:
                MAX(cal.peak_profit_pct) AS best_peak_profit_pct
         FROM channels c
         LEFT JOIN calls cal ON cal.channel_id = c.id
-            AND cal.status != 'unpriceable_loss'
+            AND cal.status NOT IN ('unpriceable_loss', 'excluded')
         WHERE c.id = ?
         GROUP BY c.id
         """,

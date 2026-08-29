@@ -52,10 +52,16 @@ class Settings:
     # Birdeye (alternative pricing source)
     birdeye_api_key: str = field(default_factory=lambda: os.getenv("BIRDEYE_API_KEY", ""))
 
-    # Rate limits (requests per minute). Free public API ~= 30, paid ~= 250.
-    # We deliberately stay a touch below the ceiling to avoid 429s.
-    free_rpm: int = 28
-    paid_rpm: int = 240
+    # Rate limits (requests per minute). Empirically (2026-08) GeckoTerminal's
+    # "Cloudflare protection" is a rolling-window origin limiter that trips at
+    # ~23 effective RPM — ABOVE the ~20 advertised. The sustained target is
+    # computed by the RateLimiter as RPM * safety_margin (default 0.65), so
+    # these are the ADVERTISED ceilings, not the sustained rate.
+    free_rpm: int = 20
+    paid_rpm: int = 250
+    # Fraction of the advertised ceiling we target as a sustained rate. Stays
+    # ~35% below the ceiling to avoid tripping Cloudflare during normal runs.
+    rate_limit_safety_margin: float = 0.65
 
     # Database
     db_path: Path = field(
@@ -63,7 +69,7 @@ class Settings:
     )
 
     # Backfill / scoring defaults
-    peak_window_hours: int = field(default_factory=lambda: _get_int("PEAK_WINDOW_HOURS", 168))  # 7 days
+    peak_window_hours: int = field(default_factory=lambda: _get_int("PEAK_WINDOW_HOURS", 12))  # 12h (most Solana shitcoins die within 12h)
     win_multiplier: float = field(default_factory=lambda: _get_float("WIN_MULTIPLIER", 2.0))
     window_weeks: int = field(default_factory=lambda: _get_int("WINDOW_WEEKS", 12))
     # OHLCV candle timeframe: "minute" gives the most accurate entry price at the

@@ -1,13 +1,18 @@
 """
-Backtesting: score a single call against its 7-day post-call price action.
+Backtesting: score a single call against its 12-hour post-call price action.
 
-Two-phase pricing strategy (fast + accurate):
-  1. MINUTE candles — tight 30-min window around the call timestamp → exact
-     entry price at the call minute (memecoins move 5x+ per minute).
-  2. HOUR candles — full 7-day window → peak price scan over the full window.
+Single 1-minute candle window — 12 hours starting 5 minutes before the call —
+covers BOTH the exact call-minute entry price AND the peak scan. Rationale:
+~99% of Solana shitcoins die within the first 12 hours, so a 7-day window only
+adds API cost and noise. Reducing from the old two-phase (15-min minute fetch
++ 7-day hourly fetch) to a single 12h 1-minute fetch (~720 candles, one chunk)
+cuts API calls roughly in half per token.
 
-This reduces API calls from ~11 (all-minute, 7-day) to ~2 per token while
-giving MORE accurate results (minute entry vs hourly entry).
+Cache-first + skip short-circuit: if a token was already priced by another
+channel (present in token_meta) and the full 1-minute window for this call is
+already in the price_cache, the API call is skipped entirely and the cached
+candles are scored directly. Same-channel pump-updates are deduped earlier in
+the pipeline (window-wide), so this skip only applies across channels.
 
 Un-priceable calls (no pool, no candles, zero entry) count as a LOSS,
 per the agreed rule (denominator = all calls).
@@ -68,31 +73,53 @@ def get_cached_pool(token_address: str) -> Optional[dict]:
     return None
 
 
+def _unpriceable_pair(error: str, pool_address: Optional[str] = None):
+    """Return a (BacktestResult, StoplossResult) pair both marked unpriceable."""
+    r1 = BacktestResult(
+        entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+        peak_profit_pct=None, is_win=False, status="unpriceable_loss",
+        pool_address=pool_address, error=error,
+    )
+    r2 = StoplossResult(
+        entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+        peak_profit_pct=None, hit_stoploss=False, stoploss_timestamp=None,
+        is_win=False, status="unpriceable_loss", pool_address=pool_address, error=error,
+    )
+    return r1, r2
+
+
 def backtest_call(
     client: GeckoTerminalClient,
     token_address: str,
     call_ts,
     peak_window_hours: Optional[int] = None,
-) -> BacktestResult:
-    """Score one call. `call_ts` is a naive UTC datetime."""
+) -> tuple[BacktestResult, StoplossResult]:
+    """Score one call over its peak window; return BOTH strategies.
+
+    Returns (normal_result, stoploss_result). Both are computed from the SAME
+    single 1-minute candle fetch, so the 50% stop-loss strategy adds ZERO extra
+    API cost. `call_ts` is a naive UTC datetime.
+    Window = [call_ts - 5min, +peak_window_hours).
+    Skip short-circuit: if the token was already priced by another channel and
+    the call-minute candle is already cached, no API call is made.
+    """
     window = peak_window_hours or settings.peak_window_hours
-    end_ts = call_ts + timedelta(hours=window)
+    entry_pad_minutes = 5
+    start = call_ts - timedelta(minutes=entry_pad_minutes)
+    end = start + timedelta(hours=window)
 
     # 1. Resolve pool (cache first). resolve_pool_smart auto-detects whether
     #    the address is a token mint OR a pool address.
-    pool_info = get_cached_pool(token_address)
-    if pool_info is None:
+    cached_pool = get_cached_pool(token_address)
+    was_known = cached_pool is not None
+    if cached_pool is None:
         try:
             resolved = client.resolve_pool_smart(token_address)
         except GeckoTerminalError as e:
             log.warning("resolve_pool_smart error for %s: %s", token_address, e)
             resolved = None
         if resolved is None or not resolved.get("pool_address"):
-            return BacktestResult(
-                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
-                peak_profit_pct=None, is_win=False, status="unpriceable_loss",
-                error="no pool",
-            )
+            return _unpriceable_pair("no pool")
         pool_info = {
             "token_address": resolved.get("token_address") or token_address,
             "pool_address": resolved["pool_address"],
@@ -101,93 +128,77 @@ def backtest_call(
             "liquidity_usd": resolved.get("liquidity_usd"),
         }
         upsert_token_meta(pool_info)
+    else:
+        pool_info = cached_pool
 
     pool_address = pool_info["pool_address"]
 
-    # ---- PHASE 1: Minute candles for exact entry price ----
-    # Tight window: 5 min before call to 10 min after = 15 candles max.
-    # This gives us the open of the EXACT minute the call was posted.
-    entry_pad_minutes = 5
-    entry_window_after = 10
-    minute_start = call_ts - timedelta(minutes=entry_pad_minutes)
-    minute_end = call_ts + timedelta(minutes=entry_window_after)
-
-    entry_price: Optional[float] = None
-    entry_candle_ts = None
-
+    # 2. Fetch 1-min candles for the full window (cache-first internally).
+    # GeckoTerminalClient.fetch_ohlcv handles caching and gap-filling automatically.
     try:
-        minute_candles = client.fetch_ohlcv(
-            pool_address, token_address, minute_start, minute_end,
-            aggregate="minute",
+        candles = client.fetch_ohlcv(
+            pool_address, token_address, start, end, aggregate="minute",
         )
     except GeckoTerminalError as e:
         log.warning("minute fetch_ohlcv error for %s: %s", token_address, e)
-        minute_candles = []
+        candles = []
 
-    if minute_candles:
-        # Sort ascending; find the candle containing call_ts.
-        minute_sorted = sorted(minute_candles, key=lambda c: c.timestamp)
-        for c in minute_sorted:
-            if c.timestamp <= call_ts < c.timestamp + timedelta(minutes=1):
-                entry_price = c.open
-                entry_candle_ts = c.timestamp
-                break
-        # Fallback: use the oldest candle's open if no exact match.
-        if entry_price is None and minute_sorted:
-            entry_price = minute_sorted[0].open
-            entry_candle_ts = minute_sorted[0].timestamp
+    if not candles:
+        return _unpriceable_pair("no candles", pool_address)
 
-    # ---- PHASE 2: Hourly candles for 7-day peak scan ----
+    return (
+        score_candles(candles, call_ts, token_address, pool_address),
+        score_candles_stoploss(candles, call_ts, token_address, pool_address),
+    )
+
+
+def backtest_call_birdeye(
+    client,
+    token_address: str,
+    call_ts,
+    peak_window_hours: Optional[int] = None,
+) -> tuple[BacktestResult, StoplossResult]:
+    """Score one call using Birdeye (fast alternative to GeckoTerminal).
+
+    Birdeye takes the token address directly (no pool resolution), so each call
+    is a single 12h x 1-min fetch at ~1 req/s. Candles are cached under the
+    synthetic pool id 'birdeye' so re-runs skip the API call when the call-minute
+    candle is already cached. Returns (normal, stoploss) results.
+    """
+    from pricing.cache import load_candles, store_candles
+
+    window = peak_window_hours or settings.peak_window_hours
+    start = call_ts - timedelta(minutes=5)
+    end = start + timedelta(hours=window)
+
+    cached = load_candles("birdeye", token_address, start, end)
+    entry_cached = any(
+        c.timestamp <= call_ts < c.timestamp + timedelta(minutes=1) for c in cached
+    )
+    if entry_cached:
+        log.info(
+            "SKIPPED Birdeye pricing %s (call-minute candle cached) - no API call",
+            token_address[:12] + "...",
+        )
+        return (
+            score_candles(cached, call_ts, token_address, "birdeye"),
+            score_candles_stoploss(cached, call_ts, token_address, "birdeye"),
+        )
+
     try:
-        hour_candles = client.fetch_ohlcv(
-            pool_address, token_address, call_ts, end_ts,
-            aggregate="hour",
-        )
-    except GeckoTerminalError as e:
-        log.warning("hour fetch_ohlcv error for %s: %s", token_address, e)
-        hour_candles = []
+        candles = client.fetch_ohlcv(token_address, start, end, interval="1m")
+    except Exception as e:
+        log.warning("Birdeye fetch_ohlcv error for %s: %s", token_address, e)
+        candles = []
 
-    # If we got neither minute nor hour candles, it's unpriceable.
-    if not minute_candles and not hour_candles:
-        return BacktestResult(
-            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
-            peak_profit_pct=None, is_win=False, status="unpriceable_loss",
-            pool_address=pool_address, error="no candles (both phases)",
-        )
+    if candles:
+        store_candles("birdeye", token_address, candles, source="birdeye")
+    else:
+        return _unpriceable_pair("no candles (birdeye)", "birdeye")
 
-    # ---- Combine results ----
-    all_candles = list(minute_candles) + list(hour_candles)
-    candles_sorted = sorted(all_candles, key=lambda c: c.timestamp)
-
-    # Entry: prefer minute candle; fallback to oldest hourly candle's open.
-    if entry_price is None and candles_sorted:
-        entry_price = candles_sorted[0].open
-        entry_candle_ts = candles_sorted[0].timestamp
-
-    if not entry_price or entry_price <= 0:
-        return BacktestResult(
-            entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
-            peak_profit_pct=None, is_win=False, status="unpriceable_loss",
-            pool_address=pool_address, error="zero entry price",
-        )
-
-    # Peak: max high across ALL candles (minute + hourly).
-    peak_candle = max(all_candles, key=lambda c: c.high)
-    peak = peak_candle.high
-
-    peak_profit_pct = (peak / entry_price - 1.0) * 100.0
-    is_win = peak >= settings.win_multiplier * entry_price
-    status = "win" if is_win else "loss"
-
-    return BacktestResult(
-        entry_price_usd=entry_price,
-        peak_price_usd=peak,
-        peak_timestamp=peak_candle.timestamp,
-        peak_profit_pct=peak_profit_pct,
-        is_win=is_win,
-        status=status,
-        pool_address=pool_address,
-        candles_used=len(all_candles),
+    return (
+        score_candles(candles, call_ts, token_address, "birdeye"),
+        score_candles_stoploss(candles, call_ts, token_address, "birdeye"),
     )
 
 
@@ -310,59 +321,68 @@ def score_candles_stoploss(
 
     win_target = entry_price * win_multiplier
     loss_threshold = entry_price * (1.0 - stoploss_pct / 100.0)
-    
+
     hit_win = False
     hit_loss = False
     win_ts = None
     loss_ts = None
-    max_price = entry_price
-    max_price_ts = call_ts
-    
+    # full_max tracks the ENTIRE window's max high. A WIN reports this same
+    # peak as the normal strategy, even if the token kept pumping after 2x.
+    full_max = entry_price
+    full_max_ts = call_ts
+    # max_before_stop tracks the best price seen BEFORE a stop-out. A LOSS due
+    # to the -50% stop reports the peak up to the moment of the stop.
+    max_before_stop = entry_price
+    max_before_stop_ts = call_ts
+
     for c in sorted_candles:
         if c.timestamp < call_ts:
             continue
-            
-        if c.high > max_price:
-            max_price = c.high
-            max_price_ts = c.timestamp
-            
-        if not hit_loss and c.low <= loss_threshold:
-            hit_loss = True
-            loss_ts = c.timestamp
-            
-        if not hit_win and c.high >= win_target:
-            hit_win = True
-            win_ts = c.timestamp
-            
-        # If both hit in the same candle, guess order based on candle direction
-        if hit_loss and hit_win and loss_ts == win_ts:
-            if c.close >= c.open:
-                hit_loss = False  # Green candle: went up then down
-            else:
-                hit_win = False   # Red candle: went down then up
 
-        if hit_win or hit_loss:
-            break
+        if c.high > full_max:
+            full_max = c.high
+            full_max_ts = c.timestamp
 
-    if hit_loss:
-        return StoplossResult(
-            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
-            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
-            hit_stoploss=True, stoploss_timestamp=loss_ts, is_win=False, status="loss",
-            pool_address=pool_address, candles_used=len(sorted_candles),
-        )
-    elif hit_win:
-        return StoplossResult(
-            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
-            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
-            hit_stoploss=False, stoploss_timestamp=None, is_win=True, status="win",
-            pool_address=pool_address, candles_used=len(sorted_candles),
-        )
+        if not hit_win and not hit_loss:
+            # Still racing: 2x target vs -50% stop.
+            if c.high > max_before_stop:
+                max_before_stop = c.high
+                max_before_stop_ts = c.timestamp
+
+            if not hit_loss and c.low <= loss_threshold:
+                hit_loss = True
+                loss_ts = c.timestamp
+            if not hit_win and c.high >= win_target:
+                hit_win = True
+                win_ts = c.timestamp
+
+            # If both hit in the same candle, guess order based on candle direction.
+            if hit_loss and hit_win and loss_ts == win_ts:
+                if c.close >= c.open:
+                    hit_loss = False  # Green candle: went up then down
+                else:
+                    hit_win = False   # Red candle: went down then up
+
+        if hit_loss:
+            break  # stop-out locks the peak to max_before_stop
+        # On a win, keep scanning the rest of the window so the reported peak
+        # is the full-window max high (same value the normal strategy reports),
+        # not just the value at the moment 2x was reached.
+
+    if hit_win:
+        peak, peak_ts = full_max, full_max_ts
+        status, is_win, hit_sl, sl_ts = "win", True, False, None
+    elif hit_loss:
+        peak, peak_ts = max_before_stop, max_before_stop_ts
+        status, is_win, hit_sl, sl_ts = "loss", False, True, loss_ts
     else:
-        # Neither hit within the time window
-        return StoplossResult(
-            entry_price_usd=entry_price, peak_price_usd=max_price, peak_timestamp=max_price_ts,
-            peak_profit_pct=(max_price / entry_price - 1.0) * 100.0,
-            hit_stoploss=False, stoploss_timestamp=None, is_win=False, status="loss",
-            pool_address=pool_address, candles_used=len(sorted_candles),
-        )
+        # Neither hit within the time window -> a loss (didn't reach 2x).
+        peak, peak_ts = full_max, full_max_ts
+        status, is_win, hit_sl, sl_ts = "loss", False, False, None
+
+    return StoplossResult(
+        entry_price_usd=entry_price, peak_price_usd=peak, peak_timestamp=peak_ts,
+        peak_profit_pct=(peak / entry_price - 1.0) * 100.0,
+        hit_stoploss=hit_sl, stoploss_timestamp=sl_ts, is_win=is_win,
+        status=status, pool_address=pool_address, candles_used=len(sorted_candles),
+    )

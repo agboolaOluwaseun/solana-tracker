@@ -23,11 +23,11 @@ def load_calls_frame(channel_id: int | None = None) -> pd.DataFrame:
     conn = get_connection()
     if channel_id is None:
         rows = conn.execute(
-            "SELECT * FROM calls WHERE status != 'unpriceable_loss'"
+            "SELECT * FROM calls WHERE status NOT IN ('unpriceable_loss', 'excluded')"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM calls WHERE channel_id = ? AND status != 'unpriceable_loss'",
+            "SELECT * FROM calls WHERE channel_id = ? AND status NOT IN ('unpriceable_loss', 'excluded')",
             (channel_id,),
         ).fetchall()
     df = pd.DataFrame(rows)

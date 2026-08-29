@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS calls (
     peak_profit_pct   REAL,                        -- (peak/entry - 1) * 100
     is_win            INTEGER NOT NULL DEFAULT 0,  -- 1 = win (peak >= WIN_MULTIPLIER * entry)
     status            TEXT NOT NULL DEFAULT 'pending',  -- pending|win|loss|unpriceable_loss
+    pending_reason    TEXT,                        -- why a call is still pending (e.g. 'immature_window')
     priced_at         TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(channel_id, message_id, token_address)

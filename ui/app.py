@@ -13,9 +13,12 @@ The UI is a thin read layer over the scored SQLite tables; the heavy lifting
 """
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Make the package root importable when running `streamlit run ui/app.py`.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +29,9 @@ import streamlit as st  # noqa: E402
 
 from config import settings  # noqa: E402
 from db import init_db, get_connection  # noqa: E402
+from pipeline import PRESET_KEYS  # noqa: E402
 from ui.views import leaderboard, channel_deep_dive, call_log, manage, investigation, stoploss  # noqa: E402
+from ui.views import stoploss_leaderboard, stoploss_deep_dive  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────────────
 # Page config
@@ -251,16 +256,19 @@ def _db_pending_count() -> int:
 # ──────────────────────────────────────────────────────────────────────────
 # Backfill action (unchanged logic, styled)
 # ──────────────────────────────────────────────────────────────────────────
-def run_backfill_action(channel_ref: str, start_date, title: str | None = None) -> None:
-    """Trigger a backfill inline, streaming progress to the UI."""
-    from pipeline import Progress, run_backfill
+def run_backfill_action(channel_ref: str, preset: str, title: str | None = None) -> None:
+    """Trigger a backfill inline, streaming progress to the UI.
 
-    start_dt = datetime.strptime(str(start_date), "%Y-%m-%d")
-    end_dt = start_dt + timedelta(weeks=settings.window_weeks)
+    preset: one of pipeline.PRESET_KEYS (1d..5m). The window is anchored to the
+    period boundary (see pipeline.preset_window).
+    """
+    from pipeline import Progress, run_backfill, preset_window
+
+    start_dt, end_dt = preset_window(preset)
     username = channel_ref.lstrip("@") if channel_ref.startswith("@") else None
 
     status = st.status(
-        f"Backfilling {channel_ref} ({start_dt.date()} → {end_dt.date()})…",
+        f"Backfilling {channel_ref} [{preset}] ({start_dt.date()} → {end_dt.date()})…",
         expanded=True,
     )
 
@@ -376,7 +384,7 @@ def run_delete_action(channel_id: int, channel_name: str, delete_channel: bool) 
 # ──────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────────────────────────────────
-def _render_sidebar() -> tuple[str | None, object, bool, str | None]:
+def _render_sidebar() -> tuple[str | None, str | None, bool, str | None]:
     """Render sidebar, return (channel_ref, start_date, run_btn_clicked, title_hint)."""
     with st.sidebar:
         # ── Settings ──
@@ -443,9 +451,11 @@ def _render_sidebar() -> tuple[str | None, object, bool, str | None]:
         else:
             channel_ref = st.text_input("Channel (@username or id)", placeholder="@some_channel").strip()
 
-        start_date = st.date_input(
-            "Window start (UTC)",
-            value=(datetime.now(timezone.utc).date() - timedelta(weeks=settings.window_weeks)),
+        start_date = st.selectbox(
+            "Backfill preset",
+            options=list(PRESET_KEYS),
+            index=list(PRESET_KEYS).index("5m") if "5m" in PRESET_KEYS else 0,
+            help="1d/3d/7d start at 00:00 UTC of that day; monthly presets start at 00:00 UTC on the 1st.",
         )
 
         run_btn = st.button("🚀 Run backfill", disabled=(not channel_ref) or (not config_ok), type="primary", width="stretch")
@@ -533,30 +543,46 @@ def main() -> None:
     st.markdown(_THEME_CSS, unsafe_allow_html=True)
     _hero_html()
 
+    # Silently finalize any immature pending calls whose 12h window has now
+    # elapsed (they were deferred during a previous run).
+    try:
+        from pipeline import mature_pending_calls
+        n_matured = mature_pending_calls()
+        if n_matured:
+            st.toast(f"🕐 Priced {n_matured} previously immature call(s)")
+    except Exception as e:
+        log.warning("startup maturation failed: %s", e)
+
     channel_ref, start_date, run_btn, title_hint = _render_sidebar()
 
-    if run_btn and channel_ref and channel_ref.strip():
+    if run_btn and channel_ref and channel_ref.strip() and start_date:
         run_backfill_action(channel_ref.strip(), start_date, title=title_hint)
 
     # ── Tabs ──
-    tab_lb, tab_dd, tab_cl, tab_inv, tab_sl, tab_mg = st.tabs([
+    (tab_lb, tab_sllb, tab_dd, tab_sldd, tab_cl, tab_sl, tab_inv, tab_mg) = st.tabs([
         "🏆 Leaderboard",
+        "🏆 Leaderboard (-50%)",
         "🔎 Deep-Dive",
+        "🔎 Deep-Dive (-50%)",
         "📋 Call Log",
-        "🔬 Investigate",
         "📉 Stop-Loss",
+        "🔬 Investigate",
         "⚙️ Manage",
     ])
     with tab_lb:
         leaderboard.render()
+    with tab_sllb:
+        stoploss_leaderboard.render()
     with tab_dd:
         channel_deep_dive.render()
+    with tab_sldd:
+        stoploss_deep_dive.render()
     with tab_cl:
         call_log.render()
-    with tab_inv:
-        investigation.render()
     with tab_sl:
         stoploss.render()
+    with tab_inv:
+        investigation.render()
     with tab_mg:
         manage.render()
 

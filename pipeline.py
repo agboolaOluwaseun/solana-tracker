@@ -62,6 +62,153 @@ def make_buckets(start: datetime) -> WeekBuckets:
     return WeekBuckets(start=start, end=end, week_starts=week_starts)
 
 
+# ── Fetch presets ──────────────────────────────────────────────────────────
+
+PRESET_KEYS = ("1d", "3d", "7d", "1m", "2m", "3m", "4m", "5m")
+
+
+def preset_window(preset: str, now: Optional[datetime] = None) -> tuple[datetime, datetime]:
+    """Return (start, end) for a backfill preset. end = now; start anchored to
+    the period boundary so a 1d scan always covers 24-48h, monthly presets
+    start at 00:00 UTC on the 1st of the month N months back."""
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    if preset == "1d":
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif preset == "3d":
+        start = (now - timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif preset == "7d":
+        start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif preset.endswith("m"):
+        months = int(preset[:-1])
+        y, m = now.year, now.month
+        for _ in range(months):
+            m -= 1
+            if m == 0:
+                m, y = 12, y - 1
+        start = datetime(y, m, 1, 0, 0, 0)
+    else:
+        raise ValueError(f"unknown preset '{preset}'")
+    return start, now
+
+
+def reconcile_channel_duplicates(channel_id: int) -> int:
+    """Cross-run dedup: if the same token/ticker appears as >1 call for a
+    channel (because an earlier run only saw a later pump-update), keep the
+    EARLIEST call and hard-delete the later ones (plus their stoploss rows).
+    Returns the number of rows deleted."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, token_address, token_symbol, call_timestamp FROM calls "
+        "WHERE channel_id = ? ORDER BY call_timestamp ASC, id ASC",
+        (channel_id,),
+    ).fetchall()
+
+    seen_addr: dict = {}
+    seen_sym: dict = {}
+    to_delete: list = []
+    for r in rows:
+        addr = r["token_address"].lower()
+        sym = (r["token_symbol"] or "").upper()
+        key = seen_addr.get(addr) or (seen_sym.get(sym) if sym else None)
+        if key is None:
+            key = addr
+            seen_addr[addr] = key
+            if sym:
+                seen_sym[sym] = key
+        else:
+            to_delete.append(r["id"])  # later mention of an already-seen token
+
+    if to_delete:
+        ph = ",".join("?" * len(to_delete))
+        with transaction() as conn:
+            conn.execute(f"DELETE FROM stoploss_results WHERE call_id IN ({ph})", to_delete)
+            conn.execute(f"DELETE FROM calls WHERE id IN ({ph})", to_delete)
+        log.info("reconcile: deleted %d superseded duplicate call(s) for channel %s", len(to_delete), channel_id)
+    return len(to_delete)
+
+
+def reconcile_by_resolved_identity(channel_id: int) -> int:
+    """Post-pricing dedup: if two different addresses in the same channel resolve
+    to the same dex_pool_id (same underlying token), keep the EARLIEST call and
+    delete the later one. Catches 'update address' posts where the caller gives
+    a new address for the same token. Returns the number of rows deleted.
+    
+    This runs AFTER pricing, when token_meta is fully populated with resolved
+    pool identities. It catches the class of bug where a caller posts address A
+    (the real call), then later posts address B (an update/pump) — both resolve
+    to the same dex_pool_id, so the later one is a duplicate."""
+    conn = get_connection()
+    # Get all priced calls for this channel (status != 'pending'), with their
+    # resolved dex_pool_id from token_meta
+    rows = conn.execute(
+        """
+        SELECT c.id, c.token_address, c.call_timestamp, tm.dex_pool_id
+        FROM calls c
+        LEFT JOIN token_meta tm ON c.token_address = tm.address
+        WHERE c.channel_id = ? AND c.status != 'pending'
+        ORDER BY c.call_timestamp ASC, c.id ASC
+        """,
+        (channel_id,),
+    ).fetchall()
+
+    seen_pool: dict = {}
+    to_delete: list = []
+    for r in rows:
+        pool_id = r["dex_pool_id"]
+        if not pool_id:
+            continue  # unpriceable or unresolved — can't dedup by identity
+        key = seen_pool.get(pool_id)
+        if key is None:
+            seen_pool[pool_id] = r["id"]
+        else:
+            to_delete.append(r["id"])  # later mention of same resolved token
+
+    if to_delete:
+        ph = ",".join("?" * len(to_delete))
+        with transaction() as conn:
+            conn.execute(f"DELETE FROM stoploss_results WHERE call_id IN ({ph})", to_delete)
+            conn.execute(f"DELETE FROM calls WHERE id IN ({ph})", to_delete)
+        log.info("reconcile-by-identity: deleted %d resolved-identity duplicate(s) for channel %s", len(to_delete), channel_id)
+    return len(to_delete)
+
+
+def mature_pending_calls(progress_cb: ProgressCb = _noop) -> int:
+    """Silently finalize immature pending calls whose 12h window has now
+    elapsed. Called on app startup. Returns the number of calls priced."""
+    from pricing.backtest import backtest_call
+    from pricing.geckoterminal import GeckoTerminalClient
+
+    init_db()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, channel_id, token_address, call_timestamp FROM calls "
+        "WHERE status = 'pending' AND pending_reason = 'immature_window' "
+        "ORDER BY call_timestamp ASC"
+    ).fetchall()
+    if not rows:
+        return 0
+
+    client = GeckoTerminalClient()
+    priced = 0
+    for i, row in enumerate(rows, start=1):
+        call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        if now < call_ts + timedelta(hours=settings.peak_window_hours):
+            continue  # still immature
+        try:
+            result, sl_result = backtest_call(client, row["token_address"], call_ts)
+        except Exception as e:
+            log.exception("mature_pending backtest failed for call %s", row["id"])
+            from pricing.backtest import _unpriceable_pair
+            result, sl_result = _unpriceable_pair(str(e))
+        apply_backtest(row["channel_id"], row["id"], 0, result)
+        persist_stoploss_result(row["id"], sl_result)
+        priced += 1
+        progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows), priced=priced))
+    log.info("startup maturation: priced %d previously immature call(s)", priced)
+    return priced
+
+
 def ensure_channel(
     channel_ref: str,
     telegram_channel_id: int,
@@ -70,16 +217,26 @@ def ensure_channel(
     window_start: datetime,
     window_end: datetime,
 ) -> int:
-    """Insert/return the channel row for a backfill."""
+    """Insert/return the channel row for a backfill.
+
+    Coverage is a UNION across runs: re-running a channel with a different
+    preset (e.g. 1d after 5m) widens the recorded window instead of shrinking
+    it, so all-time data grows indefinitely. Per-run coverage lives in
+    ingestion_runs.
+    """
     with transaction() as conn:
         row = conn.execute(
-            "SELECT id FROM channels WHERE telegram_channel_id = ?",
+            "SELECT id, window_start, window_end FROM channels WHERE telegram_channel_id = ?",
             (telegram_channel_id,),
         ).fetchone()
         if row:
+            old_start = datetime.fromisoformat(row["window_start"].replace("Z", "")) if row["window_start"] else window_start
+            old_end = datetime.fromisoformat(row["window_end"].replace("Z", "")) if row["window_end"] else window_end
+            new_start = min(old_start, window_start)
+            new_end = max(old_end, window_end)
             conn.execute(
                 "UPDATE channels SET title=?, username=?, window_start=?, window_end=? WHERE id=?",
-                (title, username, _iso(window_start), _iso(window_end), row["id"]),
+                (title, username, _iso(new_start), _iso(new_end), row["id"]),
             )
             return row["id"]
         cur = conn.execute(
@@ -117,6 +274,11 @@ def persist_parsed_call(channel_id: int, call, week_index: int) -> None:
 
 def apply_backtest(channel_id: int, call_id: int, message_id: int, result) -> None:
     """Write a priced result back to the calls row."""
+    # Calculate peak_multiple from entry and peak prices
+    peak_multiple = None
+    if result.entry_price_usd and result.peak_price_usd and result.entry_price_usd > 0:
+        peak_multiple = result.peak_price_usd / result.entry_price_usd
+    
     with transaction() as conn:
         conn.execute(
             """
@@ -126,8 +288,10 @@ def apply_backtest(channel_id: int, call_id: int, message_id: int, result) -> No
                 peak_price_usd = ?,
                 peak_timestamp = ?,
                 peak_profit_pct = ?,
+                peak_multiple = ?,
                 is_win = ?,
                 status = ?,
+                pending_reason = NULL,
                 priced_at = datetime('now')
             WHERE id = ?
             """,
@@ -137,9 +301,46 @@ def apply_backtest(channel_id: int, call_id: int, message_id: int, result) -> No
                 result.peak_price_usd,
                 _iso(result.peak_timestamp) if result.peak_timestamp else None,
                 result.peak_profit_pct,
+                peak_multiple,
                 1 if result.is_win else 0,
                 result.status,
                 call_id,
+            ),
+        )
+
+
+def persist_stoploss_result(call_id: int, sl) -> None:
+    """Write a 50% stop-loss strategy result to stoploss_results (upsert)."""
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO stoploss_results
+                (call_id, entry_price_usd, peak_price_usd, peak_timestamp,
+                 peak_profit_pct, hit_stoploss, stoploss_timestamp, is_win, status, error, computed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(call_id) DO UPDATE SET
+                entry_price_usd=excluded.entry_price_usd,
+                peak_price_usd=excluded.peak_price_usd,
+                peak_timestamp=excluded.peak_timestamp,
+                peak_profit_pct=excluded.peak_profit_pct,
+                hit_stoploss=excluded.hit_stoploss,
+                stoploss_timestamp=excluded.stoploss_timestamp,
+                is_win=excluded.is_win,
+                status=excluded.status,
+                error=excluded.error,
+                computed_at=datetime('now')
+            """,
+            (
+                call_id,
+                sl.entry_price_usd,
+                sl.peak_price_usd,
+                _iso(sl.peak_timestamp) if sl.peak_timestamp else None,
+                sl.peak_profit_pct,
+                1 if sl.hit_stoploss else 0,
+                _iso(sl.stoploss_timestamp) if sl.stoploss_timestamp else None,
+                1 if sl.is_win else 0,
+                sl.status,
+                sl.error,
             ),
         )
 
@@ -151,6 +352,7 @@ def run_backfill(
     title: Optional[str] = None,
     username: Optional[str] = None,
     fetch_limit: Optional[int] = None,
+    pricing_source: str = "geckoterminal",
     progress_cb: ProgressCb = _noop,
 ) -> Progress:
     """
@@ -224,11 +426,17 @@ def run_backfill(
             raw_count, deduped_count, raw_count - deduped_count,
         )
 
+    # 2b. Cross-run reconciliation: a previous (shorter) run may have inserted
+    #     a later pump-update as "the call"; now that a longer window sees the
+    #     true first call, hard-delete the superseded duplicates (oldest wins).
+    reconcile_channel_duplicates(channel_id)
+
     # 3. PRICE all pending calls for this channel ---------------------------
     progress.stage = "price"
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     conn = get_connection()
     pending = conn.execute(
-        "SELECT id, message_id, token_address, call_timestamp FROM calls "
+        "SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp FROM calls "
         "WHERE channel_id = ? AND status = 'pending' ORDER BY call_timestamp ASC",
         (channel_id,),
     ).fetchall()
@@ -243,6 +451,8 @@ def run_backfill(
     progress_cb(progress)
 
     client = GeckoTerminalClient()
+    from pricing.birdeye import BirdeyeClient
+    birdeye_client = BirdeyeClient()
     priced = 0
     unpriceable = 0
     for i, row in enumerate(pending, start=1):
@@ -253,27 +463,69 @@ def run_backfill(
             i, len(pending), addr[:12] + "…" + addr[-4:],
         )
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        # Immature-window guard: a call whose 12h peak window hasn't elapsed
+        # yet can't be scored fairly. Mark it and let startup maturation price
+        # it later — never lock in a premature loss.
+        if now_utc < call_ts + timedelta(hours=settings.peak_window_hours):
+            with transaction() as conn:
+                conn.execute(
+                    "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
+                    (row["id"],),
+                )
+            log.info("call %s immature (<12h old) — deferred to startup maturation", row["id"])
+            continue
         try:
-            result = backtest_call(client, addr, call_ts)
+            if pricing_source == "birdeye":
+                from pricing.backtest import backtest_call_birdeye
+                result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts)
+            else:
+                result, sl_result = backtest_call(client, addr, call_ts)
+                # Birdeye fallback: if GeckoTerminal couldn't price this token
+                # (no pool / no candles), try Birdeye which doesn't need pool
+                # resolution — it takes the token address directly.
+                if result.status == "unpriceable_loss":
+                    from pricing.backtest import backtest_call_birdeye
+                    
+                    # Check if addr is a pool address or token address
+                    # Birdeye needs token mints, not pool addresses
+                    birdeye_addr = addr
+                    meta_row = conn.execute(
+                        "SELECT address FROM token_meta WHERE dex_pool_id = ?",
+                        (addr,)
+                    ).fetchone()
+                    if meta_row:
+                        # addr is a pool address, get the token mint
+                        birdeye_addr = meta_row[0]
+                        log.info(
+                            "birdeye fallback: resolved pool %s → token %s",
+                            addr[:12] + "…", birdeye_addr[:12] + "…"
+                        )
+                    
+                    log.info(
+                        "gecko unpriceable for %s — falling back to birdeye",
+                        addr[:12] + "…",
+                    )
+                    result, sl_result = backtest_call_birdeye(
+                        birdeye_client, birdeye_addr, call_ts,
+                    )
         except Exception as e:
             log.exception("backtest failed for call %s", row["id"])
             # Treat unexpected errors as unpriceable losses (don't block the run).
-            from models import BacktestResult
-            result = BacktestResult(
-                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
-                peak_profit_pct=None, is_win=False, status="unpriceable_loss",
-                error=str(e),
-            )
+            from pricing.backtest import _unpriceable_pair
+            result, sl_result = _unpriceable_pair(str(e))
         apply_backtest(channel_id, row["id"], row["message_id"], result)
+        persist_stoploss_result(row["id"], sl_result)
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
-            # Log unpriceable tokens to the terminal so you can investigate them.
+            # Log unpriceable tokens to the terminal (time + message excerpt)
+            # so you can investigate them.
             log.warning(
-                "[UNPRICEABLE] %s | %s | %s",
+                "[UNPRICEABLE] %s | %s | %s | msg: %.120s",
                 row["call_timestamp"],
                 row.get("token_symbol") or "?",
                 addr,
+                (row.get("raw_text") or "").replace("\n", " ").strip(),
             )
         else:
             priced += 1
@@ -282,7 +534,12 @@ def run_backfill(
         progress.scanned = i
         progress_cb(progress)
 
-    # 4. Record run ----------------------------------------------------------
+    # 4. Post-pricing reconciliation by resolved identity: if two different
+    #    addresses in this channel resolve to the same dex_pool_id (same token),
+    #    the later one is an "update address" post — delete it (oldest wins).
+    reconcile_by_resolved_identity(channel_id)
+
+    # 5. Record run ----------------------------------------------------------
     with transaction() as conn:
         conn.execute(
             """
@@ -331,7 +588,7 @@ def reprice_calls(
     placeholders = ",".join("?" * len(statuses))
     conn = get_connection()
     rows = conn.execute(
-        f"SELECT id, message_id, token_address, token_symbol, call_timestamp "
+        f"SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp "
         f"FROM calls WHERE channel_id = ? AND status IN ({placeholders}) "
         f"ORDER BY call_timestamp ASC",
         [channel_id, *statuses],
@@ -348,31 +605,38 @@ def reprice_calls(
     log.info("re-pricing %d calls for channel %d (statuses: %s)", len(rows), channel_id, statuses)
 
     client = GeckoTerminalClient()
+    now_utc_reprice = datetime.now(timezone.utc).replace(tzinfo=None)
     priced = 0
     unpriceable = 0
 
     for i, row in enumerate(rows, start=1):
         addr = row["token_address"]
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        # Immature-window guard (same as backfill): defer, don't score early.
+        if now_utc_reprice < call_ts + timedelta(hours=settings.peak_window_hours):
+            with transaction() as conn:
+                conn.execute(
+                    "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
+                    (row["id"],),
+                )
+            continue
         try:
-            result = backtest_call(client, addr, call_ts)
+            result, sl_result = backtest_call(client, addr, call_ts)
         except Exception as e:
             log.exception("reprice backtest failed for call %s", row["id"])
-            from models import BacktestResult
-            result = BacktestResult(
-                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
-                peak_profit_pct=None, is_win=False, status="unpriceable_loss",
-                error=str(e),
-            )
+            from pricing.backtest import _unpriceable_pair
+            result, sl_result = _unpriceable_pair(str(e))
         apply_backtest(channel_id, row["id"], row["message_id"], result)
+        persist_stoploss_result(row["id"], sl_result)
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
             log.warning(
-                "[UNPRICEABLE] %s | %s | %s",
+                "[UNPRICEABLE] %s | %s | %s | msg: %.120s",
                 row["call_timestamp"],
                 row.get("token_symbol") or "?",
                 addr,
+                (row.get("raw_text") or "").replace("\n", " ").strip(),
             )
         else:
             priced += 1
@@ -380,6 +644,10 @@ def reprice_calls(
         progress.unpriceable = unpriceable
         progress.scanned = i
         progress_cb(progress)
+
+    # Post-pricing reconciliation by resolved identity (same as backfill):
+    # if two different addresses resolve to the same dex_pool_id, delete the later.
+    reconcile_by_resolved_identity(channel_id)
 
     with transaction() as conn:
         conn.execute(
@@ -482,7 +750,7 @@ def reprice_with_birdeye(
     If call_ids is provided, only prices those specific call rows.
     """
     from pricing.birdeye import BirdeyeClient, BirdeyeError
-    from pricing.backtest import score_candles
+    from pricing.backtest import score_candles, score_candles_stoploss
     from models import BacktestResult
 
     init_db()
@@ -494,14 +762,14 @@ def reprice_with_birdeye(
     if call_ids:
         placeholders = ",".join("?" * len(call_ids))
         rows = conn.execute(
-            f"SELECT id, message_id, token_address, call_timestamp "
+            f"SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp "
             f"FROM calls WHERE id IN ({placeholders}) "
             f"ORDER BY call_timestamp ASC",
             call_ids,
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, message_id, token_address, call_timestamp FROM calls "
+            "SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp FROM calls "
             "WHERE channel_id = ? AND status = 'unpriceable_loss' "
             "ORDER BY call_timestamp ASC",
             (channel_id,),
@@ -522,31 +790,39 @@ def reprice_with_birdeye(
     for i, row in enumerate(rows, start=1):
         addr = row["token_address"]
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
-        end_ts = call_ts + timedelta(hours=settings.peak_window_hours)
+        peak = settings.peak_window_hours
+        start_ts = call_ts - timedelta(minutes=5)
+        end_ts = start_ts + timedelta(hours=peak)
 
         try:
-            # Fetch minute candles for entry price (tight window)
-            minute_candles = client.fetch_ohlcv(
+            # Single 1-minute fetch over the peak window (12h) covers BOTH the
+            # call-minute entry price and the peak scan.
+            candles = client.fetch_ohlcv(
                 addr,
-                call_ts - timedelta(minutes=5),
-                call_ts + timedelta(minutes=10),
+                start_ts,
+                end_ts,
                 interval="1m",
             )
-            # Fetch hourly candles for 7-day peak scan
-            hour_candles = client.fetch_ohlcv(
-                addr,
-                call_ts,
-                end_ts,
-                interval="1H",
-            )
         except BirdeyeError as e:
-            log.warning("Birdeye pricing failed for %s: %s", addr[:12] + "…", e)
+            log.warning("Birdeye pricing failed for %s: %s", addr[:12] + "...", e)
             result = BacktestResult(
                 entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
                 peak_profit_pct=None, is_win=False, status="unpriceable_loss",
                 error=f"Birdeye: {e}",
             )
+            from models import StoplossResult
+            sl_result = StoplossResult(
+                entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+                peak_profit_pct=None, hit_stoploss=False, stoploss_timestamp=None,
+                is_win=False, status="unpriceable_loss", error=f"Birdeye: {e}",
+            )
+            persist_stoploss_result(row["id"], sl_result)
             unpriceable += 1
+            log.warning(
+                "[UNPRICEABLE-BIRDEYE] %s | %s | %s | msg: %.120s",
+                row["call_timestamp"], row.get("token_symbol") or "?", addr,
+                (row.get("raw_text") or "").replace("\n", " ").strip(),
+            )
             conn.execute(
                 "UPDATE calls SET status='unpriceable_loss', priced_at=datetime('now') "
                 "WHERE id = ?",
@@ -558,9 +834,9 @@ def reprice_with_birdeye(
             progress_cb(progress)
             continue
 
-        # Score using the same logic as GeckoTerminal backtest
-        all_candles = list(minute_candles) + list(hour_candles)
-        result = score_candles(all_candles, call_ts, addr)
+        # Score using the same logic as GeckoTerminal backtest (both strategies).
+        result = score_candles(candles, call_ts, addr)
+        sl_result = score_candles_stoploss(candles, call_ts, addr)
 
         conn.execute(
             """UPDATE calls SET
@@ -571,6 +847,7 @@ def reprice_with_birdeye(
                 peak_profit_pct = ?,
                 is_win = ?,
                 status = ?,
+                pending_reason = NULL,
                 priced_at = datetime('now')
             WHERE id = ?""",
             (
@@ -584,6 +861,7 @@ def reprice_with_birdeye(
                 row["id"],
             ),
         )
+        persist_stoploss_result(row["id"], sl_result)
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
@@ -703,8 +981,8 @@ def run_stoploss_backtest(
 
     Stores results in the stoploss_results table.
     """
-    from pricing.birdeye import BirdeyeClient, BirdeyeError
-    from pricing.backtest import score_candles_stoploss
+    from pricing.cache import load_candles
+    from pricing.backtest import score_candles_stoploss, StoplossResult
 
     init_db()
     init_stoploss_table()
@@ -747,13 +1025,12 @@ def run_stoploss_backtest(
         return progress
 
     log.info("stoploss backtest: %d calls to process", len(rows))
-    client = BirdeyeClient()
     done = 0
     errors = 0
 
     for i, row in enumerate(rows, start=1):
         call_id = row["id"]
-        addr = row["token_address"]
+        token_address = row["token_address"]
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
         window = settings.peak_window_hours
         end_ts = call_ts + timedelta(hours=window)
@@ -770,48 +1047,31 @@ def run_stoploss_backtest(
             continue
 
         try:
-            # Fetch hourly candles for the full window
-            hour_candles = client.fetch_ohlcv(
-                addr, call_ts, end_ts, interval="1H",
-            )
+            # Load cached 1-minute candles from price_cache — NO API calls.
+            # Try birdeye source first, then geckoterminal (any pool).
+            candles = load_candles("birdeye", token_address, call_ts, end_ts)
+            if not candles:
+                pools = conn.execute(
+                    "SELECT DISTINCT pool_address FROM price_cache "
+                    "WHERE token_address = ? AND source = 'geckoterminal'",
+                    (token_address,)
+                ).fetchall()
+                for (pool,) in pools:
+                    candles = load_candles(pool, token_address, call_ts, end_ts)
+                    if candles:
+                        break
 
-            # If both targets are hit in the same hour, fetch 1m candles for
-            # that hour to resolve the chronological order.
-            if hour_candles:
-                sorted_h = sorted(hour_candles, key=lambda c: c.timestamp)
-                entry = row["entry_price_usd"] or sorted_h[0].open
-                win_target = entry * 2.0
-                loss_threshold = entry * 0.5
-
-                ambiguous_hours = []
-                for c in sorted_h:
-                    if c.timestamp < call_ts:
-                        continue
-                    hit_win = c.high >= win_target
-                    hit_loss = c.low <= loss_threshold
-                    if hit_win and hit_loss:
-                        ambiguous_hours.append(c.timestamp)
-
-                # Fetch 1m candles for any ambiguous hours
-                minute_candles = []
-                for ambig_ts in ambiguous_hours:
-                    try:
-                        mc = client.fetch_ohlcv(
-                            addr, ambig_ts, ambig_ts + timedelta(hours=1),
-                            interval="1m",
-                        )
-                        minute_candles.extend(mc)
-                    except BirdeyeError:
-                        pass
-
-                all_candles = list(hour_candles) + minute_candles
+            if not candles:
+                result = StoplossResult(
+                    entry_price_usd=None, peak_price_usd=None, peak_timestamp=None,
+                    peak_profit_pct=None, hit_stoploss=False, stoploss_timestamp=None,
+                    is_win=False, status="unpriceable_loss", error="no cached candles",
+                )
             else:
-                all_candles = []
-
-            result = score_candles_stoploss(
-                all_candles, call_ts, addr,
-                win_multiplier=2.0, stoploss_pct=50.0,
-            )
+                result = score_candles_stoploss(
+                    candles, call_ts, token_address,
+                    win_multiplier=2.0, stoploss_pct=50.0,
+                )
 
             # Store result
             conn.execute(

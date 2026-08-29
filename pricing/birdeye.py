@@ -95,6 +95,15 @@ class BirdeyeClient:
 
         resp = self.session.get(f"{_BIRDEYE_BASE}/defi/ohlcv", params=params, timeout=30)
 
+        # Transient 429/5xx: retry a couple of times with backoff so a brief
+        # throttle doesn't mark a real token unpriceable.
+        for _attempt in range(2):
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                break
+            time.sleep(2.0 * (_attempt + 1))
+            _rate_limit(self._last_call)
+            resp = self.session.get(f"{_BIRDEYE_BASE}/defi/ohlcv", params=params, timeout=30)
+
         if resp.status_code != 200:
             raise BirdeyeError(
                 f"HTTP {resp.status_code} from Birdeye: {resp.text[:300]}"

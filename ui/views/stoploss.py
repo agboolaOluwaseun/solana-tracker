@@ -63,31 +63,11 @@ def _get_stoploss_summary() -> dict:
 def render() -> None:
     st.header("📉 50% Stop-Loss Strategy")
     st.caption(
-        "Compare the **normal strategy** (buy at call, hold for 7 days, record peak) "
-        "vs the **50% stop-loss strategy** (sell if price drops 50%, take profit at 2x). "
-        "Uses Birdeye 1-hour candles with 1-minute refinement for ambiguous hours."
+        "Compare the **normal strategy** (win = peak ≥ 2x within 12h) vs the "
+        "**-50% stop-loss strategy** (win = reached 2x without first dropping 50%). "
+        "Both are computed from the same 12h × 1-minute candles during pricing — "
+        "no extra API calls."
     )
-
-    # --- Run backtest button ---
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        channels = _get_channels()
-        if channels:
-            ch_labels = [c["label"] for c in channels]
-            ch_choice = st.selectbox(
-                "Channel (optional — leave empty for all)",
-                options=[-1] + list(range(len(channels))),
-                format_func=lambda i: "All channels" if i == -1 else ch_labels[i],
-                key="sl_channel",
-            )
-            channel_id = None if ch_choice == -1 else channels[ch_choice]["id"]
-        else:
-            channel_id = None
-            st.info("No channels in DB yet.")
-    with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🚀 Run stop-loss backtest", type="primary", key="run_sl_backtest"):
-            _run_backtest(channel_id)
 
     # --- Summary ---
     summary = _get_stoploss_summary()
@@ -107,7 +87,7 @@ def render() -> None:
         m4.metric("Win Rate", fmt_pct(wr, decimals=1))
         m5.metric("Avg Peak", fmt_pct(summary.get("avg_peak"), decimals=1))
     else:
-        st.info("No stop-loss results yet. Click the button above to run the backtest.")
+        st.info("No stop-loss results yet. Run a backfill to populate both strategies.")
         return
 
     # --- Results table ---
