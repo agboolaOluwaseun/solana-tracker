@@ -67,6 +67,9 @@ class Settings:
     db_path: Path = field(
         default_factory=lambda: PROJECT_ROOT / os.getenv("DB_PATH", "solana_tracker.db")
     )
+    # Which DDL file init_db applies. Default keeps legacy behaviour; set
+    # SCHEMA_FILE=schema_unified.sql together with DB_PATH=kolfi.db for cutover.
+    schema_file: str = field(default_factory=lambda: os.getenv("SCHEMA_FILE", "schema.sql"))
 
     # Backfill / scoring defaults
     peak_window_hours: int = field(default_factory=lambda: _get_int("PEAK_WINDOW_HOURS", 12))  # 12h (most Solana shitcoins die within 12h)

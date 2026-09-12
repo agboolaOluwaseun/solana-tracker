@@ -63,26 +63,35 @@ def _win_col(strategy: str) -> str:
     return "sr.is_win" if strategy == "stoploss" else "cal.is_win"
 
 
-def channel_stats_window(channel_id: int, window: str, strategy: str) -> Dict:
+def _chain_clause(chain: Optional[str]) -> tuple[str, list]:
+    """SQL fragment restricting a query to one chain ('sol'|'robinhood') or all."""
+    if chain in (None, "all"):
+        return "", []
+    return " AND cal.chain = ?", [chain]
+
+
+def channel_stats_window(channel_id: int, window: str, strategy: str,
+                         chain: Optional[str] = "all") -> Dict:
     """Win rate / counts / avg peak for a channel over a display window."""
     since = window_since(window)
     conn = get_connection()
     win_col = _win_col(strategy)
+    chain_sql, chain_params = _chain_clause(chain)
     if strategy == "stoploss":
         q = f"""
             SELECT COUNT(sr.id) AS total_calls, SUM(sr.is_win) AS wins,
                    AVG(sr.peak_profit_pct) AS avg_peak_profit_pct
             FROM calls cal {_strategy_join(strategy)}
-            WHERE cal.channel_id = ?
+            WHERE cal.channel_id = ?{chain_sql}
         """
     else:
         q = f"""
             SELECT COUNT(cal.id) AS total_calls, SUM(cal.is_win) AS wins,
                    AVG(cal.peak_profit_pct) AS avg_peak_profit_pct
             FROM calls cal
-            WHERE cal.channel_id = ? {_strategy_join(strategy)}
+            WHERE cal.channel_id = ?{chain_sql} {_strategy_join(strategy)}
         """
-    params: list = [channel_id]
+    params: list = [channel_id] + chain_params
     if since:
         q += " AND cal.call_timestamp >= ?"
         params.append(_iso(since))
@@ -97,7 +106,8 @@ def channel_stats_window(channel_id: int, window: str, strategy: str) -> Dict:
     }
 
 
-def channel_buckets(channel_id: int, window: str, strategy: str) -> List[Dict]:
+def channel_buckets(channel_id: int, window: str, strategy: str,
+                    chain: Optional[str] = "all") -> List[Dict]:
     """Bucketed win rates for the deep-dive chart.
 
     Granularity: 1m -> weekly; 3m/all -> monthly; 1d/7d -> daily.
@@ -113,8 +123,9 @@ def channel_buckets(channel_id: int, window: str, strategy: str) -> List[Dict]:
     conn = get_connection()
     win_col = _win_col(strategy)
     join = _strategy_join(strategy)
-    where = "cal.channel_id = ?"
-    params: list = [channel_id]
+    chain_sql, chain_params = _chain_clause(chain)
+    where = "cal.channel_id = ?" + chain_sql
+    params: list = [channel_id] + chain_params
     if since:
         where += " AND cal.call_timestamp >= ?"
         params.append(_iso(since))
@@ -149,22 +160,24 @@ def channel_buckets(channel_id: int, window: str, strategy: str) -> List[Dict]:
     return out
 
 
-def current_streak(channel_id: int, strategy: str) -> int:
+def current_streak(channel_id: int, strategy: str,
+                   chain: Optional[str] = "all") -> int:
     """Current consecutive-win streak (most recent decided calls, newest first)."""
     conn = get_connection()
     win_col = _win_col(strategy)
+    chain_sql, chain_params = _chain_clause(chain)
     if strategy == "stoploss":
         q = f"""
             SELECT sr.is_win AS w FROM calls cal {_strategy_join(strategy)}
-            WHERE cal.channel_id = ? ORDER BY cal.call_timestamp DESC
+            WHERE cal.channel_id = ?{chain_sql} ORDER BY cal.call_timestamp DESC
         """
     else:
         q = f"""
             SELECT cal.is_win AS w FROM calls cal
-            WHERE cal.channel_id = ? {_strategy_join(strategy)}
+            WHERE cal.channel_id = ?{chain_sql} {_strategy_join(strategy)}
             ORDER BY cal.call_timestamp DESC
         """
-    rows = conn.execute(q, [channel_id]).fetchall()
+    rows = conn.execute(q, [channel_id] + chain_params).fetchall()
     streak = 0
     for r in rows:
         if int(r["w"] or 0) == 1:

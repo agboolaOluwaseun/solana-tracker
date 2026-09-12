@@ -14,7 +14,6 @@ from typing import Iterator
 
 from config import PROJECT_ROOT, settings
 
-_SCHEMA_PATH = PROJECT_ROOT / "schema.sql"
 _local = threading.local()
 
 
@@ -49,8 +48,9 @@ def transaction() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
-    schema = _SCHEMA_PATH.read_text(encoding="utf-8")
+    """Create tables if they don't exist (schema chosen by settings.schema_file)."""
+    schema_path = PROJECT_ROOT / settings.schema_file
+    schema = schema_path.read_text(encoding="utf-8")
     conn = get_connection()
     conn.executescript(schema)
     # Guarded migration for pre-existing DBs: CREATE TABLE IF NOT EXISTS does
