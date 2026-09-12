@@ -259,8 +259,11 @@ def score_candles(
             pool_address=pool_address, error="zero entry price",
         )
 
-    # Peak: max high across all candles.
-    peak_candle = max(sorted_candles, key=lambda c: c.high)
+    # Peak: max high across candles at/after the call only — a pre-call
+    # pump must never count as the win (12h window is a subset of 7d, so
+    # peaks have to come from post-call candles or wins can "flip" to losses).
+    post_call = [c for c in sorted_candles if c.timestamp >= call_ts] or sorted_candles
+    peak_candle = max(post_call, key=lambda c: c.high)
     peak = peak_candle.high
     peak_profit_pct = (peak / entry_price - 1.0) * 100.0
     is_win = peak >= settings.win_multiplier * entry_price
