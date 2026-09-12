@@ -79,6 +79,18 @@ class Settings:
     # exact call minute (memecoins move 5x+ within a single minute).
     ohlcv_timeframe: str = field(default_factory=lambda: os.getenv("OHLCV_TIMEFRAME", "minute"))
 
+    # Pricing engine switch (Workstream C). 'legacy' = 12h minute-window scorer
+    # (today's behaviour). '7d' = exact-spec 7-day engine (pricing/strategy7d.py);
+    # requires the unified schema (SCHEMA_FILE=schema_unified.sql, DB_PATH=kolfi.db).
+    # Validated setting going forward is PRICING_ENGINE=7d; flip manually in .env.
+    pricing_engine: str = field(default_factory=lambda: os.getenv("PRICING_ENGINE", "legacy"))
+    eval_days: int = field(default_factory=lambda: _get_int("EVAL_DAYS", 7))
+    # Option 2: if the exact call-minute candle is missing, accept the first
+    # post-call minute candle starting within this many minutes after the call.
+    entry_grace_minutes: int = field(default_factory=lambda: _get_int("ENTRY_GRACE_MINUTES", 5))
+    # GeckoTerminal network id for the Robinhood Chain (dual-chain ingestion).
+    robinhood_network: str = "robinhood"
+
     @property
     def requests_per_minute(self) -> int:
         """Effective GeckoTerminal RPM based on whether a key is present."""

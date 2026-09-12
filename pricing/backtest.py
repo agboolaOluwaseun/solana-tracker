@@ -31,38 +31,75 @@ from pricing.geckoterminal import GeckoTerminalClient, GeckoTerminalError
 log = logging.getLogger(__name__)
 
 
-def upsert_token_meta(meta: dict) -> None:
+def _token_meta_has_chain(conn) -> bool:
+    """Unified kolfi.db has a chain column on token_meta; legacy schema.sql doesn't.
+    Writers must adapt so the same code runs pre- and post-cutover."""
+    return any(r["name"] == "chain"
+               for r in conn.execute("PRAGMA table_info(token_meta)").fetchall())
+
+
+def upsert_token_meta(meta: dict, chain: str = "sol") -> None:
+    """Store/refresh a token's pool meta. `chain` is 'sol' or 'robinhood'
+    (unified kolfi.db PK is (chain, address); legacy schema keeps its
+    single-address PK — base58 and 0x namespaces can't collide)."""
     with transaction() as conn:
-        conn.execute(
-            """
-            INSERT INTO token_meta (address, symbol, name, dex_pool_id, liquidity_usd)
-            VALUES (:address, :symbol, :name, :dex_pool_id, :liquidity_usd)
-            ON CONFLICT(address) DO UPDATE SET
-                symbol=excluded.symbol, name=excluded.name,
-                dex_pool_id=excluded.dex_pool_id, liquidity_usd=excluded.liquidity_usd
-            """,
-            {
-                "address": meta["token_address"],
-                "symbol": meta.get("symbol"),
-                "name": meta.get("name"),
-                "dex_pool_id": meta.get("pool_address"),
-                "liquidity_usd": meta.get("liquidity_usd"),
-            },
-        )
+        if _token_meta_has_chain(conn):
+            conn.execute(
+                """
+                INSERT INTO token_meta (chain, address, symbol, name, dex_pool_id, liquidity_usd)
+                VALUES (:chain, :address, :symbol, :name, :dex_pool_id, :liquidity_usd)
+                ON CONFLICT(chain, address) DO UPDATE SET
+                    symbol=excluded.symbol, name=excluded.name,
+                    dex_pool_id=excluded.dex_pool_id, liquidity_usd=excluded.liquidity_usd
+                """,
+                {
+                    "chain": chain,
+                    "address": meta["token_address"],
+                    "symbol": meta.get("symbol"),
+                    "name": meta.get("name"),
+                    "dex_pool_id": meta.get("pool_address"),
+                    "liquidity_usd": meta.get("liquidity_usd"),
+                },
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO token_meta (address, symbol, name, dex_pool_id, liquidity_usd)
+                VALUES (:address, :symbol, :name, :dex_pool_id, :liquidity_usd)
+                ON CONFLICT(address) DO UPDATE SET
+                    symbol=excluded.symbol, name=excluded.name,
+                    dex_pool_id=excluded.dex_pool_id, liquidity_usd=excluded.liquidity_usd
+                """,
+                {
+                    "address": meta["token_address"],
+                    "symbol": meta.get("symbol"),
+                    "name": meta.get("name"),
+                    "dex_pool_id": meta.get("pool_address"),
+                    "liquidity_usd": meta.get("liquidity_usd"),
+                },
+            )
 
 
-def get_cached_pool(token_address: str) -> Optional[dict]:
+def get_cached_pool(token_address: str, chain: str = "sol") -> Optional[dict]:
     conn = __import__("db").get_connection()
-    row = conn.execute(
-        "SELECT dex_pool_id, symbol, name, liquidity_usd FROM token_meta WHERE address = ?",
-        (token_address,),
-    ).fetchone()
+    if _token_meta_has_chain(conn):
+        row = conn.execute(
+            "SELECT dex_pool_id, symbol, name, liquidity_usd FROM token_meta "
+            "WHERE address = ? AND chain = ?",
+            (token_address, chain),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT dex_pool_id, symbol, name, liquidity_usd FROM token_meta WHERE address = ?",
+            (token_address,),
+        ).fetchone()
     if row and row["dex_pool_id"]:
         # Defensive: strip any legacy 'solana_' prefix from cached rows so the
         # OHLCV path never doubles the network segment.
         from pricing.geckoterminal import _strip_network_prefix
         from config import settings
-        bare = _strip_network_prefix(row["dex_pool_id"], settings.solana_network)
+        net = settings.robinhood_network if chain == "robinhood" else settings.solana_network
+        bare = _strip_network_prefix(row["dex_pool_id"], net)
         return {
             "token_address": token_address,
             "pool_address": bare,

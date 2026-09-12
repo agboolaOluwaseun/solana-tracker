@@ -190,18 +190,26 @@ def mature_pending_calls(progress_cb: ProgressCb = _noop) -> int:
         return 0
 
     client = GeckoTerminalClient()
+    has_chain = _calls_has_chain_column()
     priced = 0
     for i, row in enumerate(rows, start=1):
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
-        if now < call_ts + timedelta(hours=settings.peak_window_hours):
+        if now < call_ts + timedelta(hours=maturity_hours()):
             continue  # still immature
+        chain = row["chain"] if has_chain else "sol"
         try:
-            result, sl_result = backtest_call(client, row["token_address"], call_ts)
+            result, sl_result, r7 = price_one_call(
+                chain, client, row["token_address"], call_ts
+            )
         except Exception as e:
             log.exception("mature_pending backtest failed for call %s", row["id"])
             from pricing.backtest import _unpriceable_pair
             result, sl_result = _unpriceable_pair(str(e))
-        apply_backtest(row["channel_id"], row["id"], 0, result)
+            r7 = None
+        if r7 is not None:
+            apply_eval7d(row["id"], r7)
+        else:
+            apply_backtest(row["channel_id"], row["id"], 0, result)
         persist_stoploss_result(row["id"], sl_result)
         priced += 1
         progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows), priced=priced))
@@ -345,6 +353,209 @@ def persist_stoploss_result(call_id: int, sl) -> None:
         )
 
 
+# ---- Engine dispatcher (Workstream C) --------------------------------------
+
+_DS_CHAIN = {"sol": "solana", "robinhood": "robinhood"}
+_v2_clients: dict = {}
+_ds_client = None
+
+
+def _get_v2_client(chain: str):
+    """One GeckoTerminalClientV2 per network (solana | robinhood).
+
+    NOTE: each client carries its own token bucket; GT's real limit is per IP
+    across networks. Mixed-chain channels therefore share ~2 buckets — the
+    429 circuit breaker absorbs it, and Workstream D/G price chains in
+    separate passes anyway."""
+    from pricing.geckoterminal_v2 import GeckoTerminalClientV2
+    net = settings.robinhood_network if chain == "robinhood" else settings.solana_network
+    if net not in _v2_clients:
+        _v2_clients[net] = GeckoTerminalClientV2(network=net)
+    return _v2_clients[net]
+
+
+def _get_ds_client():
+    global _ds_client
+    if _ds_client is None:
+        from pricing.dexscreener import DexScreenerClient
+        _ds_client = DexScreenerClient()
+    return _ds_client
+
+
+def _calls_has_engine_column() -> bool:
+    conn = get_connection()
+    return any(r["name"] == "engine"
+               for r in conn.execute("PRAGMA table_info(calls)").fetchall())
+
+
+def _calls_has_chain_column() -> bool:
+    """True on the unified schema; legacy solana_tracker.db has no chain col
+    (rows there are all Solana by definition)."""
+    conn = get_connection()
+    return any(r["name"] == "chain"
+               for r in conn.execute("PRAGMA table_info(calls)").fetchall())
+
+
+def maturity_hours() -> float:
+    """Horizon after which a call can be scored fairly: the 7d engine needs
+    the full eval window; legacy needs its 12h peak window."""
+    return (settings.eval_days * 24.0 if settings.pricing_engine == "7d"
+            else float(settings.peak_window_hours))
+
+
+def eval7d_to_legacy_pair(r):
+    """Eval7dResult -> (BacktestResult, StoplossResult) — the mapping contract
+    that keeps every legacy consumer (stoploss_results writers, analysis,
+    API, UI) working unchanged under engine='7d'.
+
+    For stoploss LOSSES the reported peak is the FULL-WINDOW peak (same
+    convention legacy uses for wins); the actual stop-out moment is in
+    stoploss_timestamp."""
+    from models import BacktestResult, StoplossResult
+    peak_pct = (r.max_multiple - 1.0) * 100.0 if r.max_multiple else None
+    err = r.note if r.status_plain == "unpriceable_loss" else None
+    br = BacktestResult(
+        entry_price_usd=r.entry_price_usd, peak_price_usd=r.max_price_usd,
+        peak_timestamp=r.time_2x_reached, peak_profit_pct=peak_pct,
+        is_win=(r.status_plain == "win"), status=r.status_plain,
+        pool_address=r.pool_address, error=err,
+    )
+    sl = StoplossResult(
+        entry_price_usd=r.entry_price_usd, peak_price_usd=r.max_price_usd,
+        peak_timestamp=r.time_2x_reached, peak_profit_pct=peak_pct,
+        hit_stoploss=(r.status_stoploss == "loss" and r.minus_50_reached),
+        stoploss_timestamp=r.time_minus_50_reached,
+        is_win=(r.status_stoploss == "win"), status=r.status_stoploss,
+        pool_address=r.pool_address,
+        error=(r.note if r.status_stoploss == "unpriceable_loss" else None),
+    )
+    return br, sl
+
+
+def apply_eval7d(call_id: int, r) -> None:
+    """Write the 7d result to the calls row in ONE upsert-safe UPDATE.
+
+    Legacy-compatible columns carry the PLAIN outcome (peak_* = full-window
+    max, peak_timestamp = time_2x); every inline 7d column is stored 1:1;
+    engine='7d', scored_window='7d'. Stoploss side persists through the
+    existing persist_stoploss_result(eval7d_to_legacy_pair(r)[1])."""
+    peak_pct = (r.max_multiple - 1.0) * 100.0 if r.max_multiple else None
+    with transaction() as conn:
+        conn.execute(
+            """
+            UPDATE calls SET
+                pool_address = ?,
+                entry_price_usd = ?,
+                peak_price_usd = ?,
+                peak_timestamp = ?,
+                peak_profit_pct = ?,
+                peak_multiple = ?,
+                is_win = ?,
+                status = ?,
+                pending_reason = NULL,
+                priced_at = datetime('now'),
+                scored_window = '7d',
+                engine = '7d',
+                screening_entry_usd = ?,
+                screening_target_usd = ?,
+                target_usd = ?,
+                max_price_usd = ?,
+                min_price_usd = ?,
+                max_multiple = ?,
+                max_drawdown_pct = ?,
+                target_2x_reached = ?,
+                minus_50_reached = ?,
+                time_2x_reached = ?,
+                time_minus_50_reached = ?,
+                which_threshold_first = ?,
+                api_requests_used = ?,
+                granular_analysis_required = ?,
+                option2_entry = ?,
+                evaluation_end_timestamp = ?,
+                note = ?
+            WHERE id = ?
+            """,
+            (
+                r.pool_address,
+                r.entry_price_usd, r.max_price_usd,
+                _iso(r.time_2x_reached) if r.time_2x_reached else None,
+                peak_pct, r.max_multiple,
+                1 if r.status_plain == "win" else 0,
+                r.status_plain,
+                r.screening_entry_usd, r.screening_target_usd, r.target_usd,
+                r.max_price_usd, r.min_price_usd, r.max_multiple,
+                r.max_drawdown_pct,
+                1 if r.target_2x_reached else 0,
+                1 if r.minus_50_reached else 0,
+                _iso(r.time_2x_reached) if r.time_2x_reached else None,
+                _iso(r.time_minus_50_reached) if r.time_minus_50_reached else None,
+                r.which_threshold_first, r.api_requests_used,
+                1 if r.granular_analysis_required else 0,
+                1 if r.option2_entry else 0,
+                _iso(r.evaluation_end_timestamp) if r.evaluation_end_timestamp else None,
+                r.note,
+                call_id,
+            ),
+        )
+
+
+def price_one_call(chain: str, client, token_address: str, call_ts):
+    """Score one call under the configured engine.
+
+    -> (BacktestResult, StoplossResult, Eval7dResult|None). A None third
+    element means the legacy engine produced the pair; non-7d callers can
+    ignore it. engine='7d' resolves the pool (token_meta cache -> DexScreener
+    -> Solana-only GeckoTerminal smart fallback), runs the pure strategy7d
+    engine through aggregate-aware cached fetchers, and maps the outcome back
+    into the legacy pair shape via eval7d_to_legacy_pair."""
+    if settings.pricing_engine == "legacy":
+        if chain != "sol":
+            raise RuntimeError(
+                "legacy pricing engine has no robinhood path — set PRICING_ENGINE=7d"
+            )
+        result, sl = backtest_call(client, token_address, call_ts)
+        return result, sl, None
+    if not _calls_has_engine_column():
+        raise RuntimeError(
+            "7d engine requires the unified schema — set SCHEMA_FILE=schema_unified.sql"
+        )
+    from pricing.strategy7d import evaluate_call_7d
+    from pricing.strategy7d_cache import make_cached_fetchers
+    from pricing.backtest import get_cached_pool, upsert_token_meta
+
+    pool_info = get_cached_pool(token_address, chain)
+    if pool_info is None:
+        resolved = _get_ds_client().resolve_pool(token_address, chain=_DS_CHAIN[chain])
+        if (resolved is None or not resolved.get("pool_address")) and chain == "sol":
+            try:
+                resolved = client.resolve_pool_smart(token_address)
+            except Exception:  # noqa: BLE001
+                resolved = None
+        if resolved and resolved.get("pool_address"):
+            pool_info = {
+                "token_address": resolved.get("token_address") or token_address,
+                "pool_address": resolved["pool_address"],
+                "symbol": resolved.get("symbol"),
+                "name": resolved.get("name"),
+                "liquidity_usd": resolved.get("liquidity_usd"),
+            }
+            upsert_token_meta(pool_info, chain=chain)
+        else:
+            pool_info = None
+
+    fetch_hourly, fetch_minute = make_cached_fetchers(
+        get_connection(), _get_v2_client(chain)
+    )
+    r = evaluate_call_7d(
+        pool_info["pool_address"] if pool_info else None,
+        token_address, call_ts, fetch_hourly, fetch_minute,
+        eval_days=settings.eval_days,
+        entry_grace_minutes=settings.entry_grace_minutes,
+    )
+    result, sl = eval7d_to_legacy_pair(r)
+    return result, sl, r
+
+
 def run_backfill(
     channel_ref: str,
     window_start: datetime,
@@ -436,7 +647,8 @@ def run_backfill(
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     conn = get_connection()
     pending = conn.execute(
-        "SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp FROM calls "
+        "SELECT id, message_id, chain, token_address, token_symbol, raw_text, "
+        "call_timestamp FROM calls "
         "WHERE channel_id = ? AND status = 'pending' ORDER BY call_timestamp ASC",
         (channel_id,),
     ).fetchall()
@@ -451,6 +663,7 @@ def run_backfill(
     progress_cb(progress)
 
     client = GeckoTerminalClient()
+    has_chain = _calls_has_chain_column()
     from pricing.birdeye import BirdeyeClient
     birdeye_client = BirdeyeClient()
     priced = 0
@@ -463,27 +676,32 @@ def run_backfill(
             i, len(pending), addr[:12] + "…" + addr[-4:],
         )
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
-        # Immature-window guard: a call whose 12h peak window hasn't elapsed
-        # yet can't be scored fairly. Mark it and let startup maturation price
-        # it later — never lock in a premature loss.
-        if now_utc < call_ts + timedelta(hours=settings.peak_window_hours):
+        # Immature-window guard: a call whose evaluation window hasn't elapsed
+        # yet can't be scored fairly (12h under legacy, eval_days*24 under 7d).
+        # Mark it and let startup maturation price it later — never lock in a
+        # premature loss.
+        if now_utc < call_ts + timedelta(hours=maturity_hours()):
             with transaction() as conn:
                 conn.execute(
                     "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
                     (row["id"],),
                 )
-            log.info("call %s immature (<12h old) — deferred to startup maturation", row["id"])
+            log.info("call %s immature (<%dh old) — deferred to startup maturation",
+                     row["id"], int(maturity_hours()))
             continue
+        chain = row["chain"] if has_chain else "sol"
+        r7 = None
         try:
-            if pricing_source == "birdeye":
+            if pricing_source == "birdeye" and settings.pricing_engine == "legacy":
                 from pricing.backtest import backtest_call_birdeye
                 result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts)
             else:
-                result, sl_result = backtest_call(client, addr, call_ts)
+                result, sl_result, r7 = price_one_call(chain, client, addr, call_ts)
                 # Birdeye fallback: if GeckoTerminal couldn't price this token
                 # (no pool / no candles), try Birdeye which doesn't need pool
                 # resolution — it takes the token address directly.
-                if result.status == "unpriceable_loss":
+                # 7d-engine rows skip this: evaluate_call_7d is the authority.
+                if r7 is None and result.status == "unpriceable_loss":
                     from pricing.backtest import backtest_call_birdeye
                     
                     # Check if addr is a pool address or token address
@@ -513,7 +731,11 @@ def run_backfill(
             # Treat unexpected errors as unpriceable losses (don't block the run).
             from pricing.backtest import _unpriceable_pair
             result, sl_result = _unpriceable_pair(str(e))
-        apply_backtest(channel_id, row["id"], row["message_id"], result)
+            r7 = None
+        if r7 is not None:
+            apply_eval7d(row["id"], r7)
+        else:
+            apply_backtest(channel_id, row["id"], row["message_id"], result)
         persist_stoploss_result(row["id"], sl_result)
 
         if result.status == "unpriceable_loss":
@@ -587,12 +809,14 @@ def reprice_calls(
 
     placeholders = ",".join("?" * len(statuses))
     conn = get_connection()
+    chain_col = ", chain" if _calls_has_chain_column() else ""
     rows = conn.execute(
-        f"SELECT id, message_id, token_address, token_symbol, raw_text, call_timestamp "
+        f"SELECT id, message_id{chain_col}, token_address, token_symbol, raw_text, call_timestamp "
         f"FROM calls WHERE channel_id = ? AND status IN ({placeholders}) "
         f"ORDER BY call_timestamp ASC",
         [channel_id, *statuses],
     ).fetchall()
+    has_chain = _calls_has_chain_column()
 
     progress.total_calls = len(rows)
     progress_cb(progress)
@@ -611,9 +835,10 @@ def reprice_calls(
 
     for i, row in enumerate(rows, start=1):
         addr = row["token_address"]
+        chain = row["chain"] if has_chain else "sol"
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
         # Immature-window guard (same as backfill): defer, don't score early.
-        if now_utc_reprice < call_ts + timedelta(hours=settings.peak_window_hours):
+        if now_utc_reprice < call_ts + timedelta(hours=maturity_hours()):
             with transaction() as conn:
                 conn.execute(
                     "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
@@ -621,12 +846,16 @@ def reprice_calls(
                 )
             continue
         try:
-            result, sl_result = backtest_call(client, addr, call_ts)
+            result, sl_result, r7 = price_one_call(chain, client, addr, call_ts)
         except Exception as e:
             log.exception("reprice backtest failed for call %s", row["id"])
             from pricing.backtest import _unpriceable_pair
             result, sl_result = _unpriceable_pair(str(e))
-        apply_backtest(channel_id, row["id"], row["message_id"], result)
+            r7 = None
+        if r7 is not None:
+            apply_eval7d(row["id"], r7)
+        else:
+            apply_backtest(channel_id, row["id"], row["message_id"], result)
         persist_stoploss_result(row["id"], sl_result)
 
         if result.status == "unpriceable_loss":
@@ -678,28 +907,42 @@ def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
     Returns a summary dict with deletion counts.
     """
     init_db()
-    summary = {"calls_deleted": 0, "runs_deleted": 0, "channel_deleted": False}
+    summary = {"calls_deleted": 0, "runs_deleted": 0, "stoploss_deleted": 0, "channel_deleted": False}
 
     with transaction() as conn:
+        # Delete stoploss_results first (references calls)
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM stoploss_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
+            (channel_id,)
+        ).fetchone()
+        summary["stoploss_deleted"] = count["n"] if count else 0
+        conn.execute(
+            "DELETE FROM stoploss_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
+            (channel_id,)
+        )
+
+        # Then delete calls (references channels)
         count = conn.execute(
             "SELECT COUNT(*) AS n FROM calls WHERE channel_id = ?", (channel_id,)
         ).fetchone()
         summary["calls_deleted"] = count["n"] if count else 0
         conn.execute("DELETE FROM calls WHERE channel_id = ?", (channel_id,))
 
+        # Then delete ingestion_runs (references channels)
         count = conn.execute(
             "SELECT COUNT(*) AS n FROM ingestion_runs WHERE channel_id = ?", (channel_id,)
         ).fetchone()
         summary["runs_deleted"] = count["n"] if count else 0
         conn.execute("DELETE FROM ingestion_runs WHERE channel_id = ?", (channel_id,))
 
+        # Finally delete the channel itself
         if delete_channel:
             conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
             summary["channel_deleted"] = True
 
     log.info(
-        "deleted channel %d data: %d calls, %d runs, channel=%s",
-        channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["channel_deleted"],
+        "deleted channel %d data: %d calls, %d runs, %d stoploss, channel=%s",
+        channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["stoploss_deleted"], summary["channel_deleted"],
     )
     return summary
 
