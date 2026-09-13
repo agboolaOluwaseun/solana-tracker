@@ -37,22 +37,52 @@ def _j(rows) -> JSONResponse:
     return JSONResponse(json.loads(json.dumps(rows, default=str)))
 
 
+def _chain(request, default: str = "sol") -> str | None:
+    """?chain=sol|robinhood|all — 'all' returns None (no chain filter).
+
+    On the legacy solana_tracker.db there is no chain column (every row is
+    Solana), so any requested chain degrades to None — merged stats there
+    ARE the per-chain stats. Keeps old API clients unbroken on both DBs.
+    """
+    v = request.query_params.get("chain", default)
+    if v not in ("sol", "robinhood", "all"):
+        v = default
+    if v == "all" or not _unified():
+        return None
+    return v
+
+
+_UNIFIED: bool | None = None
+
+
+def _unified() -> bool:
+    """True when the live DB is the unified kolfi schema (has calls.chain)."""
+    global _UNIFIED
+    if _UNIFIED is None:
+        conn = get_connection()
+        _UNIFIED = any(r["name"] == "chain"
+                       for r in conn.execute("PRAGMA table_info(calls)").fetchall())
+    return _UNIFIED
+
+
 # ── /api/channels ─────────────────────────────────────────────────────────
 def channels(request):
     strategy = request.query_params.get("strategy", "normal")
     window = request.query_params.get("window", "all")
+    chain = _chain(request)
     conn = get_connection()
     rows = conn.execute(
         "SELECT id, telegram_channel_id, username, title, created_at FROM channels ORDER BY title"
     ).fetchall()
     out = []
     for r in rows:
-        st = W.channel_stats_window(r["id"], window, strategy)
-        streak = W.current_streak(r["id"], strategy)
+        st = W.channel_stats_window(r["id"], window, strategy, chain=chain)
+        streak = W.current_streak(r["id"], strategy, chain=chain)
         out.append({
             "channel_id": r["id"],
             "username": r["username"],
             "title": r["title"],
+            "chain": chain or "all",
             "total_calls": st["total_calls"],
             "win_rate": st["win_rate"],
             "avg_peak_profit_pct": st["avg_peak_profit_pct"],
@@ -70,6 +100,7 @@ def leaderboard(request):
     window for the "top call" column."""
     strategy = request.query_params.get("strategy", "normal")
     window = request.query_params.get("window", "all")
+    chain = _chain(request)
     conn = get_connection()
     since = W.window_since(window)
     rows = conn.execute(
@@ -77,31 +108,40 @@ def leaderboard(request):
     ).fetchall()
     out = []
     for r in rows:
-        st = W.channel_stats_window(r["id"], window, strategy)
+        st = W.channel_stats_window(r["id"], window, strategy, chain=chain)
         if not st["total_calls"]:
             continue  # no decided calls yet for this strategy/window
 
-        # Best call in window: highest peak_multiple among decided calls.
-        q = """
-            SELECT token_symbol, peak_multiple FROM calls
-            WHERE channel_id = ? AND status IN ('win','loss') AND peak_multiple IS NOT NULL
+        # Best call in window: highest achieved multiple among decided calls.
+        # Unified schema: COALESCE(max_multiple, peak_multiple) so 7d-engine
+        # rows (max_multiple) and legacy rows (peak_multiple) both rank.
+        mult_col = ("COALESCE(max_multiple, peak_multiple)" if _unified()
+                    else "peak_multiple")
+        q = f"""
+            SELECT token_symbol, {mult_col} AS best_mult FROM calls
+            WHERE channel_id = ? AND status IN ('win','loss')
+              AND {mult_col} IS NOT NULL
         """
         params = [r["id"]]
+        if chain:
+            q += " AND chain = ?"
+            params.append(chain)
         if since:
             q += " AND call_timestamp >= ?"
             params.append(since.replace(microsecond=0).isoformat() + "Z")
-        q += " ORDER BY peak_multiple DESC LIMIT 1"
+        q += " ORDER BY best_mult DESC LIMIT 1"
         best = conn.execute(q, params).fetchone()
 
         out.append({
             "channel_id": r["id"],
             "channel_title": r["title"],
             "channel_username": r["username"],
+            "chain": chain or "all",
             "total_calls": st["total_calls"],
             "wins": st["wins"],
             "win_rate": st["win_rate"],
             "avg_peak_profit_pct": st["avg_peak_profit_pct"],
-            "top_call_roi": best["peak_multiple"] if best else None,
+            "top_call_roi": best["best_mult"] if best else None,
             "top_call_token": best["token_symbol"] if best else None,
         })
     out.sort(key=lambda d: (d["win_rate"] or 0, d["avg_peak_profit_pct"] or 0, d["total_calls"]), reverse=True)
@@ -131,46 +171,58 @@ def channel_detail(request):
     handle = request.path_params["handle"]
     window = request.query_params.get("window", "all")
     strategy = request.query_params.get("strategy", "normal")
+    chain = _chain(request, default="all")
     row = _resolve(handle)
     if not row:
         return JSONResponse({"error": "channel not found"}, status_code=404)
-    st = W.channel_stats_window(row["id"], window, strategy)
-    return _j({**dict(row), **st, "window": window, "strategy": strategy})
+    st = W.channel_stats_window(row["id"], window, strategy, chain=chain)
+    return _j({**dict(row), **st, "window": window, "strategy": strategy,
+               "chain": chain or "all"})
 
 
 def channel_buckets(request):
     handle = request.path_params["handle"]
     window = request.query_params.get("window", "all")
     strategy = request.query_params.get("strategy", "normal")
+    chain = _chain(request, default="all")
     row = _resolve(handle)
     if not row:
         return JSONResponse({"error": "channel not found"}, status_code=404)
-    return _j(W.channel_buckets(row["id"], window, strategy))
+    return _j(W.channel_buckets(row["id"], window, strategy, chain=chain))
 
 
 def channel_streak(request):
     handle = request.path_params["handle"]
     strategy = request.query_params.get("strategy", "normal")
+    chain = _chain(request, default="all")
     row = _resolve(handle)
     if not row:
         return JSONResponse({"error": "channel not found"}, status_code=404)
-    return _j({"streak": W.current_streak(row["id"], strategy)})
+    return _j({"streak": W.current_streak(row["id"], strategy, chain=chain)})
 
 
 def channel_calls(request):
     handle = request.path_params["handle"]
     window = request.query_params.get("window", "all")
+    chain = _chain(request, default="all")
     row = _resolve(handle)
     if not row:
         return JSONResponse({"error": "channel not found"}, status_code=404)
     since = W.window_since(window)
     conn = get_connection()
-    q = """
+    unified = _unified()
+    extra = (", chain, max_multiple, which_threshold_first, api_requests_used,\n"
+             "               granular_analysis_required, max_drawdown_pct"
+             if unified else "")
+    q = f"""
         SELECT id, token_address, token_symbol, token_name, call_timestamp,
-               entry_price_usd, peak_price_usd, peak_profit_pct, is_win, status
+               entry_price_usd, peak_price_usd, peak_profit_pct, is_win, status{extra}
         FROM calls WHERE channel_id = ? AND status IN ('win','loss')
     """
     params = [row["id"]]
+    if unified and chain:
+        q += " AND chain = ?"
+        params.append(chain)
     if since:
         q += " AND call_timestamp >= ?"
         params.append(since.replace(microsecond=0).isoformat() + "Z")
@@ -180,11 +232,78 @@ def channel_calls(request):
     for r in rows:
         entry = r["entry_price_usd"]
         peak = r["peak_price_usd"]
-        out.append({
-            **dict(r),
-            "multiplier": (peak / entry) if entry and peak else None,
-        })
+        d = dict(r)
+        # Unified 7d rows may carry a more precise max_multiple; legacy rows
+        # fall back to peak/entry division. which_first renamed to 'chain-first'
+        # naming from the prototype (which_threshold_first).
+        best_mult = d.get("max_multiple") if unified else None
+        d["multiplier"] = best_mult or ((peak / entry) if entry and peak else None)
+        if unified:
+            d["which_first"] = d.pop("which_threshold_first", None)
+            d["granular"] = d.pop("granular_analysis_required", None)
+        out.append(d)
     return _j(out)
+
+
+# ── /api/channels/{handle}/tiers ────────────────────────────────────────────
+def channel_tiers(request):
+    """Cumulative performance-tier counts for the ranking meter.
+
+    ?chain=sol|robinhood|all (default sol)  ?strategy=normal|stoploss
+    ?window=1d|7d|1m|3m|all                ?days=1|3|7|30 (wins over window)
+    """
+    handle = request.path_params["handle"]
+    strategy = request.query_params.get("strategy", "normal")
+    window = request.query_params.get("window", "all")
+    chain = _chain(request)
+    row = _resolve(handle)
+    if not row:
+        return JSONResponse({"error": "channel not found"}, status_code=404)
+
+    from datetime import datetime, timedelta, timezone
+    from analysis.tiers import tier_counts
+    days_raw = request.query_params.get("days")
+    since = None
+    if days_raw:
+        try:
+            since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=int(days_raw))
+        except ValueError:
+            return JSONResponse({"error": "days must be an integer"}, status_code=400)
+    res = tier_counts(row["id"], window, strategy, chain=chain, since=since)
+
+    # Engine-effort stats over the same population (7d rows only, if present).
+    granular_calls = None
+    avg_api_requests = None
+    if _unified():
+        conn = get_connection()
+        q = ("SELECT COUNT(*) n, SUM(granular_analysis_required) g, "
+             "AVG(api_requests_used) a FROM calls cal "
+             "WHERE cal.channel_id = ? AND cal.engine = '7d' "
+             "AND cal.status IN ('win','loss')")
+        params: list = [row["id"]]
+        if chain:
+            q += " AND cal.chain = ?"
+            params.append(chain)
+        if since:
+            q += " AND cal.call_timestamp >= ?"
+            params.append(since.replace(microsecond=0).isoformat() + "Z")
+        r = conn.execute(q, params).fetchone()
+        if r and r["n"]:
+            granular_calls = r["g"] or 0
+            avg_api_requests = round(r["a"], 2) if r["a"] is not None else None
+
+    return _j({
+        "scope": {"chain": chain or "all", "strategy": strategy,
+                  "window": window, "days": int(days_raw) if days_raw else None,
+                  "since": since.replace(microsecond=0).isoformat() + "Z" if since else None},
+        "total_decided": res["total_decided"],
+        "wins": res["wins"],
+        "win_rate": res["win_rate"],
+        "tiers": [{"tier": t["label"], "count": t["count"], "pct": t["pct"]}
+                  for t in res["tiers"]],
+        "granular_calls": granular_calls,
+        "avg_api_requests": avg_api_requests,
+    })
 
 
 # ── /api/tokens ───────────────────────────────────────────────────────────
@@ -266,6 +385,10 @@ def tokens(request):
 async def fetch_stream(request: Request):
     """Stream progress updates for channel fetching via SSE.
     POST body: { "channel_ids": [12, 13], "days": 7 }
+
+    No chain parameter needed: run_backfill parses Solana mints AND
+    Robinhood 0x addresses from every message in one pass (Workstream D)
+    and prices each row via the PRICING_ENGINE dispatcher with its chain.
     """
     try:
         body = await request.json()
@@ -651,6 +774,7 @@ app = Starlette(routes=[
     Route("/api/channels/{handle}/buckets", channel_buckets),
     Route("/api/channels/{handle}/streak", channel_streak),
     Route("/api/channels/{handle}/calls", channel_calls),
+    Route("/api/channels/{handle}/tiers", channel_tiers),
     Route("/api/fetch-stream", fetch_stream, methods=["POST"]),
     Route("/api/refresh-stream", refresh_stream, methods=["POST"]),
     Route("/api/fetch", fetch_channels, methods=["POST"]),

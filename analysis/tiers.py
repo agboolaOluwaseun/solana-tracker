@@ -16,6 +16,7 @@ Invariant enforced by tests:
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from db import get_connection
@@ -29,14 +30,19 @@ TIER_LABELS = [b[0] for b in TIER_BOUNDS] + ["<2x"]
 
 
 def tier_counts(channel_id: int, window: str, strategy: str = "normal",
-                chain: Optional[str] = "all") -> Dict:
+                chain: Optional[str] = "all",
+                since: Optional[datetime] = None) -> Dict:
     """Cumulative tier counts/percentages for one channel in one timeframe.
+
+    `since` (naive UTC datetime) overrides `window` when given — the API's
+    days-pills (1|3|7|30) resolve to a concrete cutoff and pass it here.
 
     Returns {"total_decided": N,
              "tiers": [{"label": "100x", "count": c, "pct": p}, ...],
              "wins": W, "win_rate": pct|None}
     """
-    since = window_since(window)
+    if since is None:
+        since = window_since(window)
     conn = get_connection()
     chain_sql, chain_params = (
         (" AND cal.chain = ?", [chain]) if chain not in (None, "all") else ("", [])

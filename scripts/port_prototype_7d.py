@@ -177,7 +177,7 @@ def main():
                         1 if sl_lost else 0,
                         p["time_minus_50_reached"] if sl_lost else None,
                         sl_win,
-                        "won" if sl_win else "stopped",
+                        "win" if sl_win else "loss",
                     ),
                 )
             else:
