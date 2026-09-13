@@ -91,16 +91,24 @@ def preset_window(preset: str, now: Optional[datetime] = None) -> tuple[datetime
     return start, now
 
 
-def reconcile_channel_duplicates(channel_id: int) -> int:
+def reconcile_channel_duplicates(channel_id: int,
+                                 chain: Optional[str] = None) -> int:
     """Cross-run dedup: if the same token/ticker appears as >1 call for a
     channel (because an earlier run only saw a later pump-update), keep the
     EARLIEST call and hard-delete the later ones (plus their stoploss rows).
-    Returns the number of rows deleted."""
+    Returns the number of rows deleted.
+
+    `chain` ('sol' | 'robinhood') partitions the dedup on the unified schema
+    so a Solana ticker can never shadow an EVM ticker with the same symbol.
+    None (legacy schema) = all rows, byte-identical to pre-cutover behavior.
+    """
     conn = get_connection()
+    chain_filter = "AND chain = ? " if chain is not None else ""
+    params = [channel_id] + ([chain] if chain is not None else [])
     rows = conn.execute(
-        "SELECT id, token_address, token_symbol, call_timestamp FROM calls "
-        "WHERE channel_id = ? ORDER BY call_timestamp ASC, id ASC",
-        (channel_id,),
+        f"SELECT id, token_address, token_symbol, call_timestamp FROM calls "
+        f"WHERE channel_id = ? {chain_filter}ORDER BY call_timestamp ASC, id ASC",
+        params,
     ).fetchall()
 
     seen_addr: dict = {}
@@ -127,28 +135,33 @@ def reconcile_channel_duplicates(channel_id: int) -> int:
     return len(to_delete)
 
 
-def reconcile_by_resolved_identity(channel_id: int) -> int:
+def reconcile_by_resolved_identity(channel_id: int,
+                                   chain: Optional[str] = None) -> int:
     """Post-pricing dedup: if two different addresses in the same channel resolve
     to the same dex_pool_id (same underlying token), keep the EARLIEST call and
     delete the later one. Catches 'update address' posts where the caller gives
     a new address for the same token. Returns the number of rows deleted.
-    
+
     This runs AFTER pricing, when token_meta is fully populated with resolved
-    pool identities. It catches the class of bug where a caller posts address A
-    (the real call), then later posts address B (an update/pump) — both resolve
-    to the same dex_pool_id, so the later one is a duplicate."""
+    pool identities — the class of bug where a caller posts address A (the real
+    call), then later posts address B (an update/pump) for the same token.
+
+    `chain` scopes the token_meta join (PK is (chain, address) on the unified
+    schema) and the dedup partition; None = legacy single-chain behavior."""
     conn = get_connection()
-    # Get all priced calls for this channel (status != 'pending'), with their
-    # resolved dex_pool_id from token_meta
+    has_chain = _calls_has_chain_column() and chain is not None
+    join_chain = "AND c.chain = tm.chain" if has_chain else ""
+    where_chain = "AND c.chain = ?" if has_chain else ""
+    params = [channel_id] + ([chain] if has_chain else [])
     rows = conn.execute(
-        """
+        f"""
         SELECT c.id, c.token_address, c.call_timestamp, tm.dex_pool_id
         FROM calls c
-        LEFT JOIN token_meta tm ON c.token_address = tm.address
-        WHERE c.channel_id = ? AND c.status != 'pending'
+        LEFT JOIN token_meta tm ON c.token_address = tm.address {join_chain}
+        WHERE c.channel_id = ? AND c.status != 'pending' {where_chain}
         ORDER BY c.call_timestamp ASC, c.id ASC
         """,
-        (channel_id,),
+        params,
     ).fetchall()
 
     seen_pool: dict = {}
@@ -181,8 +194,9 @@ def mature_pending_calls(progress_cb: ProgressCb = _noop) -> int:
     init_db()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     conn = get_connection()
+    chain_col = ", chain" if _calls_has_chain_column() else ""
     rows = conn.execute(
-        "SELECT id, channel_id, token_address, call_timestamp FROM calls "
+        f"SELECT id, channel_id{chain_col}, token_address, call_timestamp FROM calls "
         "WHERE status = 'pending' AND pending_reason = 'immature_window' "
         "ORDER BY call_timestamp ASC"
     ).fetchall()
@@ -257,26 +271,29 @@ def ensure_channel(
         return cur.lastrowid
 
 
-def persist_parsed_call(channel_id: int, call, week_index: int) -> None:
-    """Insert a parsed call as 'pending' (idempotent on the unique key)."""
+def persist_parsed_call(channel_id: int, call, week_index: int,
+                        chain: str = "sol") -> None:
+    """Insert a parsed call as 'pending' (idempotent on the unique key).
+
+    `chain` is written only on the unified schema; legacy rows are all
+    Solana by definition."""
+    has_chain = _calls_has_chain_column()
+    cols = "chain, " if has_chain else ""
+    vals = "?, " if has_chain else ""
+    params: list = [channel_id, call.message_id, call.raw_text[:2000],
+                    call.token_address, call.token_symbol, call.token_name,
+                    _iso(call.timestamp), week_index]
+    if has_chain:
+        params.insert(1, chain)
     with transaction() as conn:
         conn.execute(
-            """
+            f"""
             INSERT OR IGNORE INTO calls
-                (channel_id, message_id, raw_text, token_address, token_symbol,
+                (channel_id, {cols}message_id, raw_text, token_address, token_symbol,
                  token_name, call_timestamp, week_index, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, {vals}?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
-            (
-                channel_id,
-                call.message_id,
-                call.raw_text[:2000],
-                call.token_address,
-                call.token_symbol,
-                call.token_name,
-                _iso(call.timestamp),
-                week_index,
-            ),
+            params,
         )
 
 
@@ -609,25 +626,53 @@ def run_backfill(
     tg_id = fetched[0].channel_id if fetched else abs(hash(channel_ref)) % (10 ** 12)
     channel_id = ensure_channel(channel_ref, tg_id, title or fetched_title, username, window_start, window_end)
 
-    # 2. PARSE → deduplicate → persist -----------------------------------
+    # 2. PARSE (both chains) → deduplicate → persist ------------------------
+    # One fetch, two parsers over the SAME message list: Solana base58 mints
+    # via ingestion.address_parser, Robinhood-chain 0x EVM addresses via the
+    # vendored chains.robinhood_impl.parser. The alphabets are disjoint
+    # (base58 excludes '0'), so the two passes can never collide.
     progress.stage = "parse"
-    all_parsed: list = []
+    dual_chain = _calls_has_chain_column()
+    sol_parsed: list = []
+    rh_parsed: list = []
     for msg in fetched:
         parsed = parse_message(msg)
         if parsed is not None:
-            all_parsed.append(parsed)
-    raw_count = len(all_parsed)
+            sol_parsed.append(parsed)
+        if dual_chain:
+            from models import ParsedCall as _RHCall  # same field names
+            from chains.robinhood_impl import parser as rh_parser
+            for rh_call in rh_parser.parse_calls(
+                msg.channel_id, msg.message_id, msg.text, msg.timestamp
+            ):
+                rh_parsed.append(_RHCall(
+                    channel_id=rh_call.channel_id,
+                    message_id=rh_call.message_id,
+                    raw_text=rh_call.raw_text,
+                    token_address=rh_call.token_address,
+                    token_symbol=rh_call.token_symbol,
+                    token_name=None,
+                    timestamp=rh_call.timestamp,
+                ))
+    raw_count = len(sol_parsed) + len(rh_parsed)
     # Sort chronologically (oldest first) BEFORE dedup so the FIRST call
-    # (not the latest update/pump post) is the one we keep.
-    all_parsed.sort(key=lambda c: c.timestamp)
-    # Deduplicate: same token_address or ticker within 24h → keep first only.
-    all_parsed = deduplicate_calls(all_parsed)
-    deduped_count = len(all_parsed)
-    for parsed in all_parsed:
+    # (not the latest update/pump post) is the one we keep. Dedup is
+    # per-chain: a token called on both chains is legitimately two rows.
+    sol_parsed.sort(key=lambda c: c.timestamp)
+    sol_parsed = deduplicate_calls(sol_parsed)
+    rh_parsed.sort(key=lambda c: c.timestamp)
+    rh_parsed = deduplicate_calls(rh_parsed) if rh_parsed else []
+    deduped_count = len(sol_parsed) + len(rh_parsed)
+    for parsed in sol_parsed:
         week_index = buckets.week_index(parsed.timestamp)
         if week_index == 0:
             week_index = max(1, min(settings.window_weeks, week_index or 1))
-        persist_parsed_call(channel_id, parsed, week_index)
+        persist_parsed_call(channel_id, parsed, week_index, chain="sol")
+    for parsed in rh_parsed:
+        week_index = buckets.week_index(parsed.timestamp)
+        if week_index == 0:
+            week_index = max(1, min(settings.window_weeks, week_index or 1))
+        persist_parsed_call(channel_id, parsed, week_index, chain="robinhood")
     progress.found = deduped_count
     progress.total_calls = deduped_count
     progress_cb(progress)
@@ -636,11 +681,21 @@ def run_backfill(
             "dedup: %d raw calls -> %d after window-wide dedup (%d pump-updates removed)",
             raw_count, deduped_count, raw_count - deduped_count,
         )
+    if rh_parsed:
+        log.info("dual-chain: %d solana + %d robinhood calls found",
+                 len(sol_parsed), len(rh_parsed))
 
     # 2b. Cross-run reconciliation: a previous (shorter) run may have inserted
     #     a later pump-update as "the call"; now that a longer window sees the
     #     true first call, hard-delete the superseded duplicates (oldest wins).
-    reconcile_channel_duplicates(channel_id)
+    #     Partitioned per chain on the unified schema (a sol ticker must never
+    #     shadow an EVM ticker with the same symbol).
+    if dual_chain:
+        reconcile_channel_duplicates(channel_id, chain="sol")
+        if rh_parsed:
+            reconcile_channel_duplicates(channel_id, chain="robinhood")
+    else:
+        reconcile_channel_duplicates(channel_id)
 
     # 3. PRICE all pending calls for this channel ---------------------------
     progress.stage = "price"
@@ -668,6 +723,8 @@ def run_backfill(
     birdeye_client = BirdeyeClient()
     priced = 0
     unpriceable = 0
+    priced_rh = 0
+    unpriceable_rh = 0
     for i, row in enumerate(pending, start=1):
         addr = row["token_address"]
         sym = ""  # we don't have it in the pending row; use the address prefix
@@ -740,6 +797,8 @@ def run_backfill(
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
+            if chain == "robinhood":
+                unpriceable_rh += 1
             # Log unpriceable tokens to the terminal (time + message excerpt)
             # so you can investigate them.
             log.warning(
@@ -751,6 +810,8 @@ def run_backfill(
             )
         else:
             priced += 1
+            if chain == "robinhood":
+                priced_rh += 1
         progress.priced = priced
         progress.unpriceable = unpriceable
         progress.scanned = i
@@ -759,26 +820,55 @@ def run_backfill(
     # 4. Post-pricing reconciliation by resolved identity: if two different
     #    addresses in this channel resolve to the same dex_pool_id (same token),
     #    the later one is an "update address" post — delete it (oldest wins).
-    reconcile_by_resolved_identity(channel_id)
+    if dual_chain:
+        reconcile_by_resolved_identity(channel_id, chain="sol")
+        if any(r["chain"] == "robinhood" for r in pending):
+            reconcile_by_resolved_identity(channel_id, chain="robinhood")
+    else:
+        reconcile_by_resolved_identity(channel_id)
 
-    # 5. Record run ----------------------------------------------------------
+    # 5. Record run(s) --------------------------------------------------------
+    # Unified schema: one ingestion_runs row per chain that produced calls
+    # ('sol' always; 'robinhood' only when RH calls were priced). Legacy
+    # schema has no chain column -> single combined row, as before.
+    conn = get_connection()
+    run_has_chain = any(r["name"] == "chain"
+                        for r in conn.execute("PRAGMA table_info(ingestion_runs)").fetchall())
+    started_iso = _iso(datetime.now(timezone.utc).replace(tzinfo=None))
     with transaction() as conn:
-        conn.execute(
-            """
-            INSERT INTO ingestion_runs
-                (channel_id, started_at, finished_at, mode, messages_scanned,
-                 calls_found, calls_priced, calls_unpriceable, status)
-            VALUES (?, ?, datetime('now'), 'resume', ?, ?, ?, ?, 'completed')
-            """,
-            (
-                channel_id,
-                _iso(datetime.now(timezone.utc).replace(tzinfo=None)),
-                progress.scanned,
-                progress.found,
-                priced,
-                unpriceable,
-            ),
-        )
+        if run_has_chain:
+            runs = [("sol", len(sol_parsed), priced - priced_rh,
+                     unpriceable - unpriceable_rh)]
+            if rh_parsed:
+                runs.append(("robinhood", len(rh_parsed), priced_rh, unpriceable_rh))
+            for chain_name, found_n, priced_n, unp_n in runs:
+                conn.execute(
+                    """
+                    INSERT INTO ingestion_runs
+                        (channel_id, chain, started_at, finished_at, mode, messages_scanned,
+                         calls_found, calls_priced, calls_unpriceable, status)
+                    VALUES (?, ?, ?, datetime('now'), 'resume', ?, ?, ?, ?, 'completed')
+                    """,
+                    (channel_id, chain_name, started_iso, progress.scanned,
+                     found_n, priced_n, unp_n),
+                )
+        else:
+            conn.execute(
+                """
+                INSERT INTO ingestion_runs
+                    (channel_id, started_at, finished_at, mode, messages_scanned,
+                     calls_found, calls_priced, calls_unpriceable, status)
+                VALUES (?, ?, datetime('now'), 'resume', ?, ?, ?, ?, 'completed')
+                """,
+                (
+                    channel_id,
+                    started_iso,
+                    progress.scanned,
+                    progress.found,
+                    priced,
+                    unpriceable,
+                ),
+            )
 
     progress.stage = "done"
     progress.message = "backfill complete"

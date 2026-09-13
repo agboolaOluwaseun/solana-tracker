@@ -1,0 +1,138 @@
+2026-09-09 15:21:43,888 - INFO - libssl detected, it will be used for encryption
+======================================================================
+SIMULATION: eleetmo ramblings
+======================================================================
+Database: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_eleetmo.db
+Window: April 1, 2026 → now
+
+Step 1: Fetching messages from Telegram...
+2026-09-09 15:21:44,038 - INFO - Connecting to 149.154.167.92:443/TcpFull...
+2026-09-09 15:21:44,193 - INFO - Connection to 149.154.167.92:443/TcpFull complete!
+  Scanned 100 messages...
+  Scanned 200 messages...
+  Scanned 300 messages...
+  Scanned 400 messages...
+  Scanned 500 messages...
+  Scanned 600 messages...
+  Scanned 700 messages...
+  Scanned 800 messages...
+  Scanned 900 messages...
+  Scanned 1000 messages...
+  Scanned 1100 messages...
+  Scanned 1200 messages...
+  Scanned 1300 messages...
+  Scanned 1400 messages...
+  Scanned 1500 messages...
+  Scanned 1600 messages...
+  Scanned 1700 messages...
+  Scanned 1800 messages...
+  Scanned 1900 messages...
+  Scanned 2000 messages...
+  Scanned 2100 messages...
+  Scanned 2200 messages...
+  Scanned 2300 messages...
+  Scanned 2400 messages...
+  Scanned 2500 messages...
+  Scanned 2600 messages...
+2026-09-09 15:22:13,028 - INFO - Disconnecting from 149.154.167.92:443/TcpFull...
+2026-09-09 15:22:13,029 - INFO - Disconnection from 149.154.167.92:443/TcpFull complete!
+2026-09-09 15:22:13,035 - INFO - fetched 2543 messages from @eleetmoramblings (scanned 2640)
+  Fetched 2543 messages
+
+Step 2: Parsing addresses and deduplicating...
+  Raw calls found: 61
+  After dedup: 52 calls
+
+Step 3: Persisting calls to database...
+  Persisted 52 calls
+
+Step 4: Pricing calls with pipeline_v2...
+  Pricing 52 calls...
+
+2026-09-09 15:22:13,114 - INFO - Phase 1: Resolving 52 unique pools (cache-first)...
+2026-09-09 15:22:13,116 - INFO - Pool resolution: 0/52 cached, 52 to resolve
+2026-09-09 15:22:33,400 - WARNING - DexScreener request failed for MANLTv7xE8: HTTPSConnectionPool(host='api.dexscreener.com', port=443): Max retries exceeded with url: /latest/dex/tokens/MANLTv7xE86VGU5g1K4Dm2cpKandgyoFXtNmdKZ86xc (Caused by SSLError(SSLError(1, '[SSL: SSLV3_ALERT_BAD_RECORD_MAC] ssl/tls alert bad record mac (_ssl.c:2559)')))
+2026-09-09 15:22:41,242 - INFO - DexScreener resolved 38/52, 14 need GeckoTerminal fallback
+2026-09-09 15:26:08,468 - INFO - Pool resolution batch: 50/52 resolved
+2026-09-09 15:26:08,468 - INFO - Phase 1 complete: 50 pools resolved in 235.4s
+2026-09-09 15:26:08,468 - INFO - Phase 2: Fetching OHLCV for 52 calls (rate-limited)...
+2026-09-09 15:28:16,265 - INFO - Progress: 10/52 (19%) | 4.7 calls/min | ETA: 537s
+2026-09-09 15:30:49,465 - INFO - Progress: 20/52 (38%) | 4.3 calls/min | ETA: 450s
+2026-09-09 15:31:00,788 - INFO - HTTP 429 on /networks/solana/pools/HXFDxwervt35vNJq91y57P8vzfpocK3Qm8dC8kmBLwiH/ohlcv/minute — cooldown engaged (target now 5 RPM)
+2026-09-09 15:33:04,019 - INFO - Progress: 30/52 (58%) | 4.3 calls/min | ETA: 305s
+2026-09-09 15:35:29,594 - INFO - Progress: 40/52 (77%) | 4.3 calls/min | ETA: 168s
+2026-09-09 15:37:31,140 - INFO - Progress: 50/52 (96%) | 4.4 calls/min | ETA: 27s
+2026-09-09 15:37:55,771 - INFO - Progress: 52/52 (100%) | 4.4 calls/min | ETA: 0s
+2026-09-09 15:37:55,771 - INFO - Phase 2 complete: 52 calls in 707.4s (4.4 calls/min)
+2026-09-09 15:37:55,772 - INFO - Total: Phase 1=235.4s + Phase 2=707.4s = 942.7s (15.7 min)
+
+  Pricing complete in 942.8s (15.7 min)
+
+Step 5: Updating database with results...
+  Database updated
+
+======================================================================
+REPORT: eleetmo ramblings
+======================================================================
+Total calls: 52
+Decided: 48 (wins: 6, losses: 42)
+Unpriceable: 4
+Win rate (normal strategy): 12.5%
+
+ALL 48 CALLS (by peak multiple desc):
+----------------------------------------------------------------------
+  ID Symbol         Call Time            Peak  Status
+----------------------------------------------------------------------
+  50 ?              2026-08-13T15:04    4.93x  WIN
+  21 ?              2026-05-26T12:38    4.78x  WIN
+  28 ?              2026-06-02T11:13    4.37x  WIN
+  41 ?              2026-06-22T13:07    2.46x  WIN
+  27 ?              2026-06-01T14:43    2.17x  WIN
+   2 ?              2026-04-07T17:10    2.02x  WIN
+  34 ?              2026-06-12T12:54    1.94x  loss
+  52 ?              2026-08-18T12:06    1.88x  loss
+   9 ?              2026-04-22T22:05    1.88x  loss
+  17 ?              2026-05-07T11:16    1.83x  loss
+  24 ?              2026-05-27T17:33    1.76x  loss
+  16 ?              2026-05-06T16:22    1.76x  loss
+  23 ?              2026-05-26T20:09    1.74x  loss
+  26 ?              2026-05-31T13:36    1.73x  loss
+   1 ?              2026-04-02T13:02    1.71x  loss
+   4 ?              2026-04-10T13:09    1.67x  loss
+  19 ?              2026-05-19T21:12    1.65x  loss
+  18 ?              2026-05-12T16:11    1.63x  loss
+  12 ?              2026-04-28T13:12    1.60x  loss
+   7 ?              2026-04-19T21:27    1.59x  loss
+  29 ?              2026-06-03T12:42    1.58x  loss
+  25 ?              2026-05-29T12:33    1.57x  loss
+  48 ?              2026-08-06T16:36    1.56x  loss
+  11 ?              2026-04-28T11:14    1.48x  loss
+  35 ?              2026-06-12T19:45    1.45x  loss
+   6 ?              2026-04-15T18:38    1.44x  loss
+  36 ?              2026-06-14T13:09    1.43x  loss
+   8 ?              2026-04-20T22:08    1.41x  loss
+  31 ?              2026-06-06T13:36    1.39x  loss
+  40 ?              2026-06-20T12:16    1.38x  loss
+  30 ?              2026-06-05T11:10    1.36x  loss
+  49 ?              2026-08-11T12:22    1.34x  loss
+  22 ?              2026-05-26T16:16    1.33x  loss
+  33 ?              2026-06-10T13:05    1.31x  loss
+   3 ?              2026-04-10T11:23    1.29x  loss
+  20 ?              2026-05-23T14:26    1.27x  loss
+  45 ?              2026-07-09T13:50    1.27x  loss
+  42 ?              2026-06-22T18:37    1.25x  loss
+  43 ?              2026-07-02T17:01    1.25x  loss
+  47 ?              2026-08-04T23:21    1.19x  loss
+   5 ?              2026-04-11T13:26    1.13x  loss
+  44 ?              2026-07-07T14:04    1.08x  loss
+  13 ?              2026-04-30T14:47    1.07x  loss
+  46 ?              2026-07-23T12:02    1.07x  loss
+  15 ?              2026-04-30T20:57    1.05x  loss
+  32 ?              2026-06-09T12:16    1.03x  loss
+  51 ?              2026-08-17T15:48    1.01x  loss
+  10 ?              2026-04-24T17:01    1.00x  loss
+
+CSV exported: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_eleetmo_report.csv
+======================================================================
+Simulation complete!
+======================================================================

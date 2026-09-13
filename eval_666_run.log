@@ -1,0 +1,123 @@
+[2026-09-10T16:21:15Z] 666: evaluating 88 calls (screening + optional minute resolution)...
+
+  5/88 | 0.9 min elapsed | ETA 15.7 min
+2026-09-10 17:23:00,747 INFO HTTP 429 on /networks/solana/pools/6FwSkpNduhFLwScqWQpKWuZyy9kJjY9ktxpXNANkPYDj/ohlcv/minute — cooldown engaged (target now 5 RPM)
+  10/88 | 3.0 min elapsed | ETA 23.2 min
+  15/88 | 5.0 min elapsed | ETA 24.4 min
+  20/88 | 6.4 min elapsed | ETA 21.9 min
+  25/88 | 8.1 min elapsed | ETA 20.3 min
+  30/88 | 9.7 min elapsed | ETA 18.7 min
+  35/88 | 11.3 min elapsed | ETA 17.1 min
+  40/88 | 12.7 min elapsed | ETA 15.3 min
+  45/88 | 14.2 min elapsed | ETA 13.5 min
+2026-09-10 17:36:00,645 INFO HTTP 429 on /networks/solana/pools/H5gzcMCCXDZeXzNedDGfEPJnpYAYuYhH6t4Cyxt5PdFz/ohlcv/hour — cooldown engaged (target now 5 RPM)
+  50/88 | 16.2 min elapsed | ETA 12.3 min
+  55/88 | 18.0 min elapsed | ETA 10.8 min
+  60/88 | 19.6 min elapsed | ETA 9.2 min
+  65/88 | 21.5 min elapsed | ETA 7.6 min
+  70/88 | 23.3 min elapsed | ETA 6.0 min
+  75/88 | 25.3 min elapsed | ETA 4.4 min
+  80/88 | 26.9 min elapsed | ETA 2.7 min
+  85/88 | 29.0 min elapsed | ETA 1.0 min
+
+================================================================================
+7-DAY EVALUATION STRATEGY — 666 (started 2026-09-10T16:21:15Z)
+================================================================================
+Finished in 1811s (30.2 min) — 88 calls
+
+Plain strategy:    41W / 40L / 7 unp  ->  50.6% WR
+Stoploss strategy: 31W / 50L / 7 unp  ->  38.3% WR
+API requests: 146 total, 1.66/call | granular analysis: 59/88 | 3rd-request hours: 1 | same-candle wins: 0
+
+  ID Sym          Call              Leg12h   Leg7d    New   Stopl    Mult  Note
+------------------------------------------------------------------------------------
+   1 HYRAX        2026-04-01T20:45  loss     loss     loss  loss      -    screening LOSS
+   2 ?            2026-04-02T03:47  loss     loss     loss  loss    1.65x  minus50
+   3 TIGER        2026-04-02T21:51  loss     win      win   loss    2.33x  minus50
+   4 ?            2026-04-11T01:10  loss     loss     loss  loss      -    screening LOSS
+   5 CARROTJAK    2026-04-12T22:06  loss     loss     loss  loss      -    screening LOSS
+   6 ?            2026-04-13T19:14  loss     win      win   win    18.59x  2x
+   7 ?            2026-04-16T02:25  win      win      win   win     8.03x  2x
+   8 BELKA        2026-04-16T03:54  loss     loss     loss  loss      -    screening LOSS
+   9 HIMS         2026-04-18T03:44  win      win      win   win     8.24x  2x
+  10 ?            2026-04-27T23:06  win      win      win   loss    7.83x  minus50
+  11 FISHHEAD     2026-04-30T21:37  win      win      win   win     5.96x  2x
+  12 ?            2026-05-01T20:12  loss     win      win   win    11.71x  2x
+  13 ?            2026-05-02T05:42  win      win      win   win     2.40x  2x
+  14 ?            2026-05-06T18:38  win      loss     loss  loss      -    screening LOSS
+  15 SCHIZO       2026-05-06T21:19  win      win      win   win     3.38x  2x
+  16 ?            2026-05-08T01:51  loss     loss     loss  loss    1.23x  minus50
+  17 WISH         2026-05-08T03:14  loss     loss     loss  loss    1.78x  none
+  18 ?            2026-05-10T21:26  loss     loss     loss  loss      -    screening LOSS
+  19 ?            2026-05-11T18:59  loss     loss     unpriceable_loss unpriceable_loss    -    no call-hour candle
+  20 ?            2026-05-12T22:47  loss     loss     loss  loss      -    screening LOSS
+  21 ?            2026-05-12T23:59  win      win      unpriceable_loss unpriceable_loss    -    no call-hour candle
+  22 BLUECHIP     2026-05-13T04:57  win      win      win   win     8.14x  2x
+  23 USDC         2026-05-13T22:05  win      win      win   win     6.12x  2x
+  24 ?            2026-05-15T06:53  loss     loss     loss  loss      -    screening LOSS
+  25 ?            2026-05-16T04:03  win      win      win   win     2.02x  2x
+  26 ?            2026-05-19T19:18  win      win      win   win     2.47x  2x
+  27 HOG          2026-05-20T01:50  loss     loss     loss  loss      -    screening LOSS
+  28 FBAI         2026-05-21T00:05  loss     ?        unpriceable_loss unpriceable_loss    -    hourly fetch failed: GeckoTerminalError
+  29 ?            2026-05-22T19:05  loss     loss     loss  loss    1.62x  minus50
+  30 ?            2026-05-22T23:03  win      win      win   win     2.79x  2x
+  31 ?            2026-05-27T00:05  loss     loss     loss  loss    1.79x  minus50
+  32 FOID         2026-05-29T03:44  loss     loss     loss  loss    1.25x  minus50
+  33 ?            2026-05-29T22:46  loss     loss     loss  loss      -    screening LOSS
+  34 HENNY        2026-05-30T20:35  loss     loss     loss  loss      -    screening LOSS
+  35 ?            2026-05-31T20:47  loss     loss     loss  loss    1.70x  minus50
+  36 AERODYNAMI   2026-06-01T23:55  loss     loss     loss  loss      -    screening LOSS
+  37 ?            2026-06-02T18:42  loss     loss     loss  loss    1.74x  minus50
+  38 ?            2026-06-03T18:27  loss     loss     loss  loss    1.35x  minus50
+  39 DATBIHGAH    2026-06-04T19:20  loss     loss     loss  loss      -    screening LOSS
+  40 SPACES       2026-06-05T07:17  loss     loss     loss  loss      -    screening LOSS
+  41 ?            2026-06-07T19:34  win      loss     loss  loss      -    screening LOSS
+  42 KUMAR        2026-06-09T21:14  loss     win      win   loss    3.91x  minus50
+  43 ?            2026-06-09T22:04  loss     loss     loss  loss      -    screening LOSS
+  44 ?            2026-06-12T04:17  loss     ?        unpriceable_loss unpriceable_loss    -    no call-hour candle
+  45 TREMP        2026-06-15T01:41  loss     loss     loss  loss    1.42x  minus50
+  46 ?            2026-06-17T01:38  win      win      win   win     3.12x  2x
+  47 ?            2026-06-19T06:12  win      win      win   win     3.48x  2x
+  48 ANSEM        2026-06-21T04:13  loss     loss     loss  loss      -    screening LOSS
+  49 ?            2026-06-23T05:20  loss     win      win   loss    3.03x  minus50
+  50 ?            2026-06-23T19:47  loss     win      win   loss    2.41x  minus50
+  51 ?            2026-07-01T02:24  loss     loss     loss  loss      -    screening LOSS
+  52 ?            2026-07-03T21:58  loss     loss     loss  loss    1.40x  minus50
+  53 FOMO         2026-07-06T22:36  loss     win      win   win    10.43x  2x
+  54 ?            2026-07-07T06:28  win      win      win   win     5.06x  2x
+  55 ?            2026-07-09T05:03  win      win      win   win     2.63x  2x
+  56 SPAZ         2026-07-10T02:32  loss     loss     loss  loss      -    screening LOSS
+  57 MENSA        2026-07-12T22:42  loss     win      win   win     2.07x  2x
+  58 BCAT         2026-07-13T05:34  win      loss     loss  loss    1.30x  minus50
+  59 UDIN         2026-07-17T19:48  loss     win      win   win     2.12x  2x
+  60 BET          2026-07-19T20:43  win      loss     loss  loss      -    screening LOSS
+  61 ?            2026-07-26T23:27  loss     win      win   win     2.35x  2x
+  62 ?            2026-07-27T16:43  loss     loss     loss  loss      -    screening LOSS
+  63 GNOMES       2026-07-28T20:07  loss     win      win   loss    3.85x  minus50
+  64 PANAMA       2026-07-30T03:37  loss     loss     loss  loss    1.15x  minus50
+  65 PIBBLE       2026-07-31T20:12  loss     loss     loss  loss    1.78x  minus50
+  66 UPDOG        2026-07-31T23:45  loss     loss     unpriceable_loss unpriceable_loss    -    no call-hour candle
+  67 ?            2026-08-01T06:10  win      win      win   win     2.01x  2x
+  68 ?            2026-08-01T19:15  win      win      win   win     2.30x  2x
+  69 WIGLET       2026-08-04T05:53  win      win      win   win     3.03x  2x
+  70 ?            2026-08-04T19:42  loss     win      win   loss    5.20x  minus50
+  71 HORSE        2026-08-04T23:47  win      win      win   loss    2.22x  minus50
+  72 ?            2026-08-05T01:14  loss     loss     loss  loss    1.14x  minus50
+  73 PUMPGUY      2026-08-09T03:06  win      win      win   win    13.53x  2x
+  74 ?            2026-08-09T07:31  win      win      win   win     2.18x  2x
+  75 AVATAR       2026-08-09T23:03  loss     win      win   loss    2.50x  minus50
+  76 ABTC         2026-08-09T23:40  win      win      unpriceable_loss unpriceable_loss    -    no call-minute candle
+  77 ?            2026-08-10T19:46  win      win      win   win     3.02x  2x
+  78 ?            2026-08-10T23:16  unp      ?        unpriceable_loss unpriceable_loss    -    no call-hour candle
+  79 TOAD         2026-08-11T21:50  loss     loss     loss  loss      -    screening LOSS
+  80 MIM          2026-08-13T02:56  win      win      win   win     2.69x  2x
+  81 ?            2026-08-13T05:37  win      win      win   loss    8.90x  minus50
+  82 ?            2026-08-15T16:20  win      loss     loss  loss    1.74x  minus50
+  83 ?            2026-08-16T03:49  loss     loss     loss  loss    1.71x  minus50
+  84 ?            2026-08-20T04:39  loss     win      win   win     3.67x  2x
+  85 ?            2026-08-27T07:50  win      win      win   win     2.01x  2x
+  86 ?            2026-08-29T02:55  win      win      win   win     7.07x  2x
+  87 ?            2026-08-29T04:11  win      win      win   win     3.03x  2x
+  88 ?            2026-08-30T18:58  loss     loss     loss  loss    1.52x  minus50
+
+CSV: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/eval_666.csv

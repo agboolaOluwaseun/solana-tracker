@@ -1,0 +1,181 @@
+2026-09-04 06:32:32,549 - INFO - libssl detected, it will be used for encryption
+======================================================================
+SIMULATION: Marcell's Trenches
+======================================================================
+Database: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_trenches.db
+Window: April 1, 2026 → now
+
+Step 1: Fetching messages from Telegram...
+2026-09-04 06:32:32,721 - INFO - Connecting to 149.154.167.92:443/TcpFull...
+2026-09-04 06:32:32,862 - INFO - Connection to 149.154.167.92:443/TcpFull complete!
+  Scanned 100 messages...
+  Scanned 200 messages...
+  Scanned 300 messages...
+  Scanned 400 messages...
+  Scanned 500 messages...
+  Scanned 600 messages...
+  Scanned 700 messages...
+  Scanned 800 messages...
+  Scanned 900 messages...
+  Scanned 1000 messages...
+  Scanned 1100 messages...
+  Scanned 1200 messages...
+  Scanned 1300 messages...
+  Scanned 1400 messages...
+  Scanned 1500 messages...
+  Scanned 1600 messages...
+  Scanned 1700 messages...
+  Scanned 1800 messages...
+  Scanned 1900 messages...
+  Scanned 2000 messages...
+  Scanned 2100 messages...
+  Scanned 2200 messages...
+  Scanned 2300 messages...
+  Scanned 2400 messages...
+  Scanned 2500 messages...
+  Scanned 2600 messages...
+  Scanned 2700 messages...
+  Scanned 2800 messages...
+  Scanned 2900 messages...
+  Scanned 3000 messages...
+  Scanned 3100 messages...
+  Scanned 3200 messages...
+  Scanned 3300 messages...
+  Scanned 3400 messages...
+  Scanned 3500 messages...
+  Scanned 3600 messages...
+  Scanned 3700 messages...
+  Scanned 3800 messages...
+  Scanned 3900 messages...
+  Scanned 4000 messages...
+  Scanned 4100 messages...
+  Scanned 4200 messages...
+  Scanned 4300 messages...
+  Scanned 4400 messages...
+2026-09-04 06:33:18,394 - INFO - Disconnecting from 149.154.167.92:443/TcpFull...
+2026-09-04 06:33:18,395 - INFO - Disconnection from 149.154.167.92:443/TcpFull complete!
+2026-09-04 06:33:18,397 - INFO - fetched 3714 messages from @marcellcooks (scanned 4467)
+  Fetched 3714 messages
+
+Step 2: Parsing addresses and deduplicating...
+  Raw calls found: 188
+  After dedup: 80 calls
+
+Step 3: Persisting calls to database...
+  Persisted 80 calls
+
+Step 4: Pricing calls with pipeline_v2...
+  Pricing 80 calls...
+
+2026-09-04 06:33:18,652 - INFO - Phase 1: Resolving 80 unique pools (cache-first)...
+2026-09-04 06:33:18,654 - INFO - Pool resolution: 0/80 cached, 80 to resolve
+2026-09-04 06:33:59,816 - INFO - DexScreener resolved 67/80, 13 need GeckoTerminal fallback
+2026-09-04 06:38:28,298 - INFO - Pool resolution batch: 75/80 resolved
+2026-09-04 06:38:28,298 - INFO - Phase 1 complete: 75 pools resolved in 309.7s
+2026-09-04 06:38:28,298 - INFO - Phase 2: Fetching OHLCV for 80 calls (rate-limited)...
+2026-09-04 06:40:30,726 - INFO - Progress: 10/80 (12%) | 4.9 calls/min | ETA: 857s
+2026-09-04 06:42:32,581 - INFO - Progress: 20/80 (25%) | 4.9 calls/min | ETA: 733s
+2026-09-04 06:44:58,191 - INFO - Progress: 30/80 (38%) | 4.6 calls/min | ETA: 650s
+2026-09-04 06:47:00,448 - INFO - Progress: 40/80 (50%) | 4.7 calls/min | ETA: 512s
+2026-09-04 06:49:26,373 - INFO - Progress: 50/80 (62%) | 4.6 calls/min | ETA: 395s
+2026-09-04 06:52:40,946 - INFO - Progress: 60/80 (75%) | 4.2 calls/min | ETA: 284s
+2026-09-04 06:55:07,932 - INFO - Progress: 70/80 (88%) | 4.2 calls/min | ETA: 143s
+2026-09-04 06:57:47,978 - INFO - Progress: 80/80 (100%) | 4.1 calls/min | ETA: 0s
+2026-09-04 06:57:47,979 - INFO - Phase 2 complete: 80 calls in 1159.8s (4.1 calls/min)
+2026-09-04 06:57:47,979 - INFO - Total: Phase 1=309.7s + Phase 2=1159.8s = 1469.5s (24.5 min)
+
+  Pricing complete in 1469.5s (24.5 min)
+
+Step 5: Updating database with results...
+  Database updated
+
+======================================================================
+REPORT: Marcell's Trenches
+======================================================================
+Total calls: 80
+Decided: 73 (wins: 12, losses: 61)
+Unpriceable: 6
+Win rate (normal strategy): 16.4%
+
+ALL 73 CALLS (by peak multiple desc):
+----------------------------------------------------------------------
+  ID Symbol         Call Time            Peak  Status
+----------------------------------------------------------------------
+  15 BUTTCOIN       2026-04-27T11:04   16.57x  WIN
+  75 GIGA           2026-08-25T22:34   10.86x  WIN
+  65 BITTY          2026-08-22T20:01    5.30x  WIN
+  17 ?              2026-05-01T00:36    3.76x  WIN
+  39 ?              2026-08-06T17:19    3.68x  WIN
+  46 MOS            2026-08-12T01:10    3.28x  WIN
+  58 ?              2026-08-19T02:09    2.98x  WIN
+  69 MET            2026-08-23T23:01    2.35x  WIN
+  73 ?              2026-08-25T18:57    2.32x  WIN
+  24 MOBY           2026-05-18T20:04    2.30x  WIN
+  38 ?              2026-08-03T19:03    2.30x  WIN
+  79 ?              2026-09-02T12:12    2.18x  WIN
+  71 MORTY          2026-08-24T08:06    1.97x  loss
+  16 ?              2026-04-29T21:29    1.91x  loss
+  56 ?              2026-08-17T16:24    1.91x  loss
+   6 MOMO           2026-04-08T04:20    1.85x  loss
+  37 ?              2026-07-29T16:23    1.85x  loss
+  50 NEST           2026-08-12T19:40    1.81x  loss
+  55 ?              2026-08-17T15:49    1.78x  loss
+  72 ?              2026-08-24T15:07    1.68x  loss
+  52 ?              2026-08-13T09:10    1.63x  loss
+  27 STAKE          2026-05-24T16:37    1.61x  loss
+  35 ?              2026-07-07T08:44    1.61x  loss
+   5 ?              2026-04-06T20:29    1.60x  loss
+  70 ?              2026-08-24T03:04    1.53x  loss
+  63 TRONCAT        2026-08-21T02:48    1.50x  loss
+  44 STONK          2026-08-11T18:57    1.44x  loss
+   3 EITHER         2026-04-02T17:30    1.42x  loss
+  29 ?              2026-05-25T20:00    1.38x  loss
+  32 BOUNTYWORK     2026-06-07T23:15    1.38x  loss
+  36 ?              2026-07-08T12:50    1.38x  loss
+  40 ?              2026-08-09T16:48    1.36x  loss
+  76 ?              2026-08-25T23:50    1.35x  loss
+   1 ?              2026-04-02T12:22    1.34x  loss
+  45 ?              2026-08-12T01:01    1.32x  loss
+  18 ?              2026-05-01T01:17    1.32x  loss
+  10 HARRY          2026-04-13T01:53    1.31x  loss
+  28 BELIEF         2026-05-24T16:41    1.31x  loss
+  61 ?              2026-08-20T14:00    1.30x  loss
+   4 ?              2026-04-05T01:52    1.27x  loss
+   9 MAXXING        2026-04-11T22:51    1.26x  loss
+   7 GENZ           2026-04-09T20:04    1.26x  loss
+  11 MILKERS        2026-04-13T01:55    1.26x  loss
+  41 ?              2026-08-09T16:52    1.24x  loss
+  34 ?              2026-06-12T20:06    1.24x  loss
+  48 SPY            2026-08-12T19:38    1.23x  loss
+  33 PARQ           2026-06-10T02:19    1.20x  loss
+  49 ?              2026-08-12T19:39    1.19x  loss
+  13 PUNCH          2026-04-15T19:28    1.18x  loss
+  60 ?              2026-08-20T12:27    1.17x  loss
+  53 BOB            2026-08-13T18:30    1.16x  loss
+  31 WORLDCUP       2026-06-07T23:11    1.14x  loss
+  66 ?              2026-08-23T09:44    1.13x  loss
+  21 ?              2026-05-11T20:18    1.11x  loss
+  42 ?              2026-08-10T00:18    1.10x  loss
+  30 ?              2026-06-03T22:17    1.10x  loss
+  26 ?              2026-05-23T21:06    1.08x  loss
+  77 OPTIMUS        2026-08-29T00:51    1.06x  loss
+  64 ?              2026-08-22T16:05    1.05x  loss
+  14 ASTEROID       2026-04-17T13:16    1.05x  loss
+   8 ?              2026-04-09T23:01    1.05x  loss
+  20 FARTCOIN       2026-05-11T19:29    1.05x  loss
+   2 PIGEON         2026-04-02T12:25    1.04x  loss
+  74 ?              2026-08-25T20:15    1.04x  loss
+  12 ?              2026-04-15T00:20    1.03x  loss
+  23 ?              2026-05-16T07:10    1.03x  loss
+  68 GRIFFAIN       2026-08-23T14:28    1.02x  loss
+  67 ?              2026-08-23T09:58    1.02x  loss
+  19 CHONKERS       2026-05-03T03:16    1.00x  loss
+  43 CATE           2026-08-10T20:21    1.00x  loss
+  47 ?              2026-08-12T10:40    1.00x  loss
+  25 GAPLA          2026-05-21T13:25    1.00x  loss
+  57 ?              2026-08-19T01:50    1.00x  loss
+
+CSV exported: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_trenches_report.csv
+======================================================================
+Simulation complete!
+======================================================================

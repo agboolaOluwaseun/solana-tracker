@@ -1,0 +1,134 @@
+2026-09-03 14:22:30,036 - telethon.crypto.aes - INFO - libssl detected, it will be used for encryption
+======================================================================
+SIMULATION: 666 🔥 Calls Channel - Initial Scan
+======================================================================
+Database: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_666.db
+Window: April 1, 2026 → now
+
+Step 1: Fetching messages from Telegram...
+2026-09-03 14:22:30,286 - telethon.network.mtprotosender - INFO - Connecting to 149.154.167.92:443/TcpFull...
+2026-09-03 14:22:30,459 - telethon.network.mtprotosender - INFO - Connection to 149.154.167.92:443/TcpFull complete!
+  Scanned 100 messages...
+  Scanned 200 messages...
+  Scanned 300 messages...
+  Scanned 400 messages...
+  Scanned 500 messages...
+  Scanned 600 messages...
+  Scanned 700 messages...
+2026-09-03 14:22:39,205 - telethon.network.mtprotosender - INFO - Disconnecting from 149.154.167.92:443/TcpFull...
+2026-09-03 14:22:39,206 - telethon.network.mtprotosender - INFO - Disconnection from 149.154.167.92:443/TcpFull complete!
+2026-09-03 14:22:39,207 - ingestion.telethon_fetcher - INFO - fetched 667 messages from @x666calls (scanned 780)
+  Fetched 667 messages
+
+Step 2: Parsing addresses and deduplicating...
+  Raw calls found: 249
+  After dedup: 88 calls
+
+Step 3: Persisting calls to database...
+  Persisted 88 calls
+
+Step 4: Pricing calls with pipeline_v2...
+  Pricing 88 calls...
+
+2026-09-03 14:22:39,305 - pricing.pipeline_v2 - INFO - Phase 1: Resolving 88 unique pools (cache-first)...
+2026-09-03 14:22:39,306 - pricing.pipeline_v2 - INFO - Pool resolution: 0/88 cached, 88 to resolve
+2026-09-03 14:23:28,685 - pricing.pipeline_v2 - INFO - DexScreener resolved 52/88, 36 need GeckoTerminal fallback
+2026-09-03 14:26:51,324 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for GpaMknxwiA: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=GpaMknxwiAKAU9u82WNKSHdzyct1XM8SJxs2oaiypump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:27:52,121 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for G2JWvVhvKX: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=G2JWvVhvKXdvDrf4zMxfUTmSaAXtFQS5bggmyivqpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:28:53,235 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for EyZHPD6raF: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=EyZHPD6raFgRu7NuxpXcUp5K3fC3feWVDUGutgkNpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:29:54,261 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for 5DNGaru5tA: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=5DNGaru5tAoGoG1R3xz8CPBaHriq375FDXCbDeNnVGWg&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:30:55,251 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for 62LUfjwReS: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=62LUfjwReSmUq9HC3nWTXFvg6rfyiqTg9mVrdsFjmjh3&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:31:56,077 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for 7E9ZXEs8oQ: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=7E9ZXEs8oQvZFa56xXFseWTKipPyCBD1d3L7Kadvpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:32:57,207 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for 4dY1sg9DMP: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=4dY1sg9DMP1Haf5nF8ZVz1XHxjo9NCb3j5zJvgjKpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:33:57,939 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for AaJ8TeBife: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=AaJ8TeBife3m1VzLmeuSFFKLmnRkdS26fza9rKaSpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:34:58,686 - pricing.pipeline_v2 - WARNING - GeckoTerminal pool resolution failed for 7VH6JtiJ8M: HTTPSConnectionPool(host='api.geckoterminal.com', port=443): Max retries exceeded with url: /api/v2/search/pools?query=7VH6JtiJ8MeksMQjetedZebUCSTp8vaWWx1XE7ptpump&network=solana (Caused by NameResolutionError("HTTPSConnection(host='api.geckoterminal.com', port=443): Failed to resolve 'api.geckoterminal.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-09-03 14:39:03,503 - pricing.pipeline_v2 - INFO - Pool resolution batch: 79/88 resolved
+2026-09-03 14:39:03,503 - pricing.pipeline_v2 - INFO - Phase 1 complete: 79 pools resolved in 984.2s
+2026-09-03 14:39:03,503 - pricing.pipeline_v2 - INFO - Phase 2: Fetching OHLCV for 88 calls (rate-limited)...
+2026-09-03 14:41:41,314 - pricing.pipeline_v2 - INFO - Progress: 10/88 (11%) | 3.8 calls/min | ETA: 1231s
+2026-09-03 14:43:43,486 - pricing.pipeline_v2 - INFO - Progress: 20/88 (23%) | 4.3 calls/min | ETA: 952s
+2026-09-03 14:46:09,224 - pricing.pipeline_v2 - INFO - Progress: 30/88 (34%) | 4.2 calls/min | ETA: 823s
+2026-09-03 14:48:10,913 - pricing.pipeline_v2 - INFO - Progress: 40/88 (45%) | 4.4 calls/min | ETA: 657s
+2026-09-03 14:50:36,878 - pricing.pipeline_v2 - INFO - Progress: 50/88 (57%) | 4.3 calls/min | ETA: 527s
+2026-09-03 14:52:50,919 - pricing.pipeline_v2 - INFO - Progress: 60/88 (68%) | 4.4 calls/min | ETA: 386s
+2026-09-03 14:55:05,197 - pricing.pipeline_v2 - INFO - Progress: 70/88 (80%) | 4.4 calls/min | ETA: 247s
+2026-09-03 14:57:06,170 - pricing.pipeline_v2 - INFO - Progress: 80/88 (91%) | 4.4 calls/min | ETA: 108s
+2026-09-03 14:58:55,816 - pricing.pipeline_v2 - INFO - Progress: 88/88 (100%) | 4.4 calls/min | ETA: 0s
+2026-09-03 14:58:55,816 - pricing.pipeline_v2 - INFO - Phase 2 complete: 88 calls in 1192.3s (4.4 calls/min)
+2026-09-03 14:58:55,816 - pricing.pipeline_v2 - INFO - Total: Phase 1=984.2s + Phase 2=1192.3s = 2176.5s (36.3 min)
+
+  Pricing complete in 2176.5s (36.3 min)
+
+Step 5: Updating database with pricing results...
+  Database updated
+
+======================================================================
+REPORT: 666 🔥 Calls Channel Simulation
+======================================================================
+
+Total calls: 88
+Decided: 85 (wins: 24, losses: 61)
+Unpriceable: 2
+Win rate (normal strategy): 28.2%
+
+Stoploss Strategy Analysis (50% stoploss):
+----------------------------------------------------------------------
+Stoploss wins (peak >= 2x): 24
+Stoploss losses (peak < 2x): 61
+Stoploss win rate: 28.2%
+
+Top 20 Calls by Peak Multiple:
+----------------------------------------------------------------------
+    ID Symbol       Call Time              Peak Status  
+----------------------------------------------------------------------
+    80 MIM          2026-08-13T02:56      8.90x WIN     
+     8 BELKA        2026-04-16T03:54      8.24x WIN     
+    21 ?            2026-05-12T23:59      8.14x WIN     
+     6 ?            2026-04-13T19:14      8.03x WIN     
+    85 ?            2026-08-27T07:50      7.07x WIN     
+    10 ?            2026-04-27T23:06      5.96x WIN     
+     9 HIMS         2026-04-18T03:44      5.65x WIN     
+    53 FOMO         2026-07-06T22:36      5.06x WIN     
+    72 ?            2026-08-05T01:14      4.04x WIN     
+    22 BLUECHIP     2026-05-13T04:57      3.61x WIN     
+    86 ?            2026-08-29T02:55      3.03x WIN     
+    76 ABTC         2026-08-09T23:40      3.02x WIN     
+    29 ?            2026-05-22T19:05      2.79x WIN     
+    79 TOAD         2026-08-11T21:50      2.69x WIN     
+    54 ?            2026-07-07T06:28      2.63x WIN     
+    25 ?            2026-05-16T04:03      2.47x WIN     
+    67 ?            2026-08-01T06:10      2.30x WIN     
+    73 PUMPGUY      2026-08-09T03:06      2.18x WIN     
+    14 ?            2026-05-06T18:38      2.16x WIN     
+    20 ?            2026-05-12T22:47      2.15x WIN     
+
+Bottom 20 Calls by Peak Multiple:
+----------------------------------------------------------------------
+    ID Symbol       Call Time              Peak Status  
+----------------------------------------------------------------------
+    52 ?            2026-07-03T21:58      1.23x LOSS    
+    60 BET          2026-07-19T20:43      1.22x LOSS    
+    32 FOID         2026-05-29T03:44      1.21x LOSS    
+    12 ?            2026-05-01T20:12      1.17x LOSS    
+    46 ?            2026-06-17T01:38      1.17x LOSS    
+     3 TIGER        2026-04-02T21:51      1.16x LOSS    
+    70 ?            2026-08-04T19:42      1.16x LOSS    
+    35 ?            2026-05-31T20:47      1.15x LOSS    
+    27 HOG          2026-05-20T01:50      1.15x LOSS    
+    63 GNOMES       2026-07-28T20:07      1.15x LOSS    
+    38 ?            2026-06-03T18:27      1.14x LOSS    
+    19 ?            2026-05-11T18:59      1.13x LOSS    
+    83 ?            2026-08-16T03:49      1.11x LOSS    
+     7 ?            2026-04-16T02:25      1.11x LOSS    
+    39 DATBIHGAH    2026-06-04T19:20      1.10x LOSS    
+    59 UDIN         2026-07-17T19:48      1.10x LOSS    
+    13 ?            2026-05-02T05:42      1.10x LOSS    
+    17 WISH         2026-05-08T03:14      1.05x LOSS    
+    78 ?            2026-08-10T23:16      1.03x LOSS    
+    61 ?            2026-07-26T23:27      1.01x LOSS    
+
+Full report exported to: /Users/agboolaoluwaseun/ZCodeProject/solana_tracker_v2/simulation_666_report.csv
+
+======================================================================
+Simulation complete!
+======================================================================
