@@ -7,7 +7,7 @@ import { useUIStore } from "@/store/uiStore";
 import { api, apiStrategy, ApiLeaderboardRow } from "@/lib/api";
 
 export default function LeaderboardPage() {
-  const { timeWindow, setTimeWindow, strategy } = useUIStore();
+  const { timeWindow, setTimeWindow, strategy, chain } = useUIStore();
   const [rows, setRows] = useState<ApiLeaderboardRow[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -15,7 +15,7 @@ export default function LeaderboardPage() {
     let cancelled = false;
     setLoading(true);
     api
-      .leaderboard(apiStrategy(strategy), timeWindow)
+      .leaderboard(apiStrategy(strategy), timeWindow, chain)
       .then((data) => {
         if (!cancelled) setRows(data);
       })
@@ -28,7 +28,7 @@ export default function LeaderboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [strategy, timeWindow]);
+  }, [strategy, timeWindow, chain]);
 
   return (
     <div>

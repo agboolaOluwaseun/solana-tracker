@@ -5,12 +5,13 @@ import { ArrowLeft, Check } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import TimeFilter from "@/components/TimeFilter";
+import PerformanceRanking from "@/components/PerformanceRanking";
 import { useUIStore } from "@/store/uiStore";
 import { api, apiStrategy, ApiDetail, ApiBucket, ApiCall } from "@/lib/api";
 import { formatMultiplier } from "@/lib/formatPrice";
 
 export default function ChannelDeepdivePage() {
-  const { timeWindow, setTimeWindow, strategy } = useUIStore();
+  const { timeWindow, setTimeWindow, strategy, deepDiveChain } = useUIStore();
   const params = useParams();
   const handle = params?.handle as string;
   const [activeTab, setActiveTab] = useState<"highest" | "recent">("highest");
@@ -25,9 +26,9 @@ export default function ChannelDeepdivePage() {
     setLoading(true);
     const s = apiStrategy(strategy);
     Promise.all([
-      api.detail(handle, s, timeWindow),
-      api.buckets(handle, s, timeWindow),
-      api.calls(handle, timeWindow),
+      api.detail(handle, s, timeWindow, deepDiveChain),
+      api.buckets(handle, s, timeWindow, deepDiveChain),
+      api.calls(handle, timeWindow, deepDiveChain),
     ])
       .then(([d, b, c]) => {
         if (cancelled) return;
@@ -44,7 +45,7 @@ export default function ChannelDeepdivePage() {
     return () => {
       cancelled = true;
     };
-  }, [handle, strategy, timeWindow]);
+  }, [handle, strategy, timeWindow, deepDiveChain]);
 
   if (loading) {
     return <p className="py-20 text-center text-[var(--text-muted)]">Loading…</p>;
@@ -106,9 +107,17 @@ export default function ChannelDeepdivePage() {
           </span>
           <span className="text-[var(--text-muted)]">
             {strategy === "50" ? "(-50% strategy)" : "(normal strategy)"} · {timeWindow}
+            {deepDiveChain !== "sol" && (
+              <> · {deepDiveChain === "robinhood" ? "Robinhood" : "All chains"}</>
+            )}
           </span>
         </div>
         <TimeFilter value={timeWindow} onChange={setTimeWindow} />
+      </div>
+
+      {/* Performance ranking meter (chain + strategy + timeframe aware) */}
+      <div className="mb-6">
+        <PerformanceRanking handle={handle} />
       </div>
 
       {/* Monthly / weekly buckets */}

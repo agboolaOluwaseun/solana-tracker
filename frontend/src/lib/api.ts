@@ -8,6 +8,8 @@ export interface ApiChannel {
   channel_id: number;
   username: string | null;
   title: string;
+  chain?: string;
+  chains?: string[] | null;  // only set when ?chain=all (which chains have decided calls)
   total_calls: number;
   win_rate: number | null;
   avg_peak_profit_pct: number | null;
@@ -20,6 +22,8 @@ export interface ApiLeaderboardRow {
   channel_id: number;
   channel_title: string;
   channel_username: string | null;
+  chain?: string;
+  chains?: string[] | null;
   total_calls: number;
   wins: number;
   win_rate: number | null;
@@ -32,6 +36,7 @@ export interface ApiDetail {
   id: number;
   username: string | null;
   title: string;
+  chain?: string;
   total_calls: number;
   wins: number;
   win_rate: number | null;
@@ -79,6 +84,22 @@ export interface ApiToken {
   call_entries: ApiTokenCallEntry[];
 }
 
+export interface ApiTier {
+  tier: string;   // "100x" ... "2x", "<2x"
+  count: number;
+  pct: number;
+}
+
+export interface ApiTiersResponse {
+  scope: { chain: string; strategy: string; window: string; days: number | null; since: string | null };
+  total_decided: number;
+  wins: number;
+  win_rate: number | null;
+  tiers: ApiTier[];
+  granular_calls: number | null;
+  avg_api_requests: number | null;
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
@@ -96,19 +117,25 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
-  channels: (strategy: string, window: string) =>
-    get<ApiChannel[]>(`/api/channels?strategy=${strategy}&window=${window}`),
-  leaderboard: (strategy: string, window: string) =>
-    get<ApiLeaderboardRow[]>(`/api/leaderboard?strategy=${strategy}&window=${window}`),
-  tokens: (window: string) => get<ApiToken[]>(`/api/tokens?window=${window}`),
-  detail: (handle: string, strategy: string, window: string) =>
-    get<ApiDetail>(`/api/channels/${encodeURIComponent(handle)}?strategy=${strategy}&window=${window}`),
-  buckets: (handle: string, strategy: string, window: string) =>
-    get<ApiBucket[]>(`/api/channels/${encodeURIComponent(handle)}/buckets?strategy=${strategy}&window=${window}`),
-  streak: (handle: string, strategy: string) =>
-    get<{ streak: number }>(`/api/channels/${encodeURIComponent(handle)}/streak?strategy=${strategy}`),
-  calls: (handle: string, window: string) =>
-    get<ApiCall[]>(`/api/channels/${encodeURIComponent(handle)}/calls?window=${window}`),
+  channels: (strategy: string, window: string, chain: string) =>
+    get<ApiChannel[]>(`/api/channels?strategy=${strategy}&window=${window}&chain=${chain}`),
+  leaderboard: (strategy: string, window: string, chain: string) =>
+    get<ApiLeaderboardRow[]>(`/api/leaderboard?strategy=${strategy}&window=${window}&chain=${chain}`),
+  tokens: (window: string, chain: string) =>
+    get<ApiToken[]>(`/api/tokens?window=${window}&chain=${chain}`),
+  detail: (handle: string, strategy: string, window: string, chain: string) =>
+    get<ApiDetail>(`/api/channels/${encodeURIComponent(handle)}?strategy=${strategy}&window=${window}&chain=${chain}`),
+  buckets: (handle: string, strategy: string, window: string, chain: string) =>
+    get<ApiBucket[]>(`/api/channels/${encodeURIComponent(handle)}/buckets?strategy=${strategy}&window=${window}&chain=${chain}`),
+  streak: (handle: string, strategy: string, chain: string) =>
+    get<{ streak: number }>(`/api/channels/${encodeURIComponent(handle)}/streak?strategy=${strategy}&chain=${chain}`),
+  calls: (handle: string, window: string, chain: string) =>
+    get<ApiCall[]>(`/api/channels/${encodeURIComponent(handle)}/calls?window=${window}&chain=${chain}`),
+  tiers: (handle: string, chain: string, strategy: string, days: number | null, window: string) =>
+    get<ApiTiersResponse>(
+      `/api/channels/${encodeURIComponent(handle)}/tiers?chain=${chain}&strategy=${strategy}` +
+      (days ? `&days=${days}` : `&window=${window}`),
+    ),
   fetch: (channelIds: number[], days: number) =>
     post<{ success: boolean; results: Array<{ channel_id: number; success: boolean; message: string }> }>("/api/fetch", { channel_ids: channelIds, days }),
 };

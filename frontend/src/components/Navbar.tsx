@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Crown, Eye, User } from "lucide-react";
 import StrategyToggle from "./StrategyToggle";
+import ChainToggle from "./ChainToggle";
 
 const navItems = [
   { label: "Leaderboard", href: "/leaderboard" },
@@ -48,6 +49,7 @@ export default function Navbar() {
           <button className="rounded-lg border border-[var(--border-subtle)] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--text-primary)]">
             + Submit KOL
           </button>
+          <ChainToggle deepDive={pathname.startsWith("/channels/")} />
           <StrategyToggle />
           <div className="flex items-center gap-2">
             <Eye className="h-5 w-5 text-[var(--accent-cyan)]" />

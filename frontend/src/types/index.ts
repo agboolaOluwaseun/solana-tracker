@@ -4,6 +4,7 @@
 
 export type TimeWindow = "1d" | "7d" | "1m" | "3m" | "all";
 export type Strategy = "50" | "100";  // 50 = stop-loss strategy, 100 = normal (2x)
+export type Chain = "sol" | "robinhood" | "all";
 export type ChannelTab = "All" | "Hot" | "Consistent" | "New";
 
 export interface ChannelCardData {
@@ -11,6 +12,8 @@ export interface ChannelCardData {
   title: string;
   username: string | null;
   avatar_url: string;
+  chain?: string;
+  chains?: string[] | null;  // per-chain tags when global chain === "all"
   total_calls: number;
   win_rate: number;
   avg_multiplier: number;

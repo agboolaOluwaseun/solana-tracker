@@ -6,6 +6,8 @@ import Link from "next/link";
 import type { ApiLeaderboardRow } from "@/lib/api";
 import { initialsAvatar } from "@/lib/api";
 import { formatMultiplier } from "@/lib/formatPrice";
+import ChainBadges from "./ChainBadges";
+import { useUIStore } from "@/store/uiStore";
 
 interface LeaderboardRowProps {
   entry: ApiLeaderboardRow;
@@ -14,6 +16,16 @@ interface LeaderboardRowProps {
 
 export default function LeaderboardRow({ entry, index }: LeaderboardRowProps) {
   const isTop = entry.rank === 1;
+  const globalChain = useUIStore((s) => s.chain);
+  const setDeepDiveChain = useUIStore((s) => s.setDeepDiveChain);
+  const onOpen = () => {
+    if (globalChain !== "all") {
+      setDeepDiveChain(globalChain);
+    } else {
+      const ch = entry.chains;
+      setDeepDiveChain(ch && ch.length === 1 ? (ch[0] as never) : "all");
+    }
+  };
   const avgMultiplier =
     entry.avg_peak_profit_pct != null ? 1 + entry.avg_peak_profit_pct / 100 : null;
 
@@ -52,9 +64,11 @@ export default function LeaderboardRow({ entry, index }: LeaderboardRowProps) {
       <div className="flex-1">
         <Link
           href={`/channels/${entry.channel_username || entry.channel_id}`}
-          className="text-base font-semibold text-[var(--text-primary)] transition-colors hover:text-[var(--accent-teal)]"
+          onClick={onOpen}
+          className="flex items-center gap-2 text-base font-semibold text-[var(--text-primary)] transition-colors hover:text-[var(--accent-teal)]"
         >
           {entry.channel_title}
+          {globalChain === "all" && <ChainBadges chains={entry.chains} />}
         </Link>
         <p className="text-sm text-[var(--text-muted)]">
           @{entry.channel_username || "—"}

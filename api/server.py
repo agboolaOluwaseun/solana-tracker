@@ -74,6 +74,15 @@ def channels(request):
     rows = conn.execute(
         "SELECT id, telegram_channel_id, username, title, created_at FROM channels ORDER BY title"
     ).fetchall()
+    # In merged 'all' mode, tag each channel with which chains actually have
+    # decided calls there, so the UI can badge rows SOL / RH / both.
+    chains_map: dict = {}
+    if chain is None and _unified():
+        for r in conn.execute(
+            "SELECT channel_id, chain FROM calls WHERE status IN ('win','loss') "
+            "GROUP BY channel_id, chain"
+        ).fetchall():
+            chains_map.setdefault(r["channel_id"], []).append(r["chain"])
     out = []
     for r in rows:
         st = W.channel_stats_window(r["id"], window, strategy, chain=chain)
@@ -83,6 +92,7 @@ def channels(request):
             "username": r["username"],
             "title": r["title"],
             "chain": chain or "all",
+            "chains": chains_map.get(r["id"], []) if chain is None else None,
             "total_calls": st["total_calls"],
             "win_rate": st["win_rate"],
             "avg_peak_profit_pct": st["avg_peak_profit_pct"],
@@ -106,6 +116,13 @@ def leaderboard(request):
     rows = conn.execute(
         "SELECT id, username, title FROM channels ORDER BY title"
     ).fetchall()
+    chains_map: dict = {}
+    if chain is None and _unified():
+        for r in conn.execute(
+            "SELECT channel_id, chain FROM calls WHERE status IN ('win','loss') "
+            "GROUP BY channel_id, chain"
+        ).fetchall():
+            chains_map.setdefault(r["channel_id"], []).append(r["chain"])
     out = []
     for r in rows:
         st = W.channel_stats_window(r["id"], window, strategy, chain=chain)
@@ -137,6 +154,7 @@ def leaderboard(request):
             "channel_title": r["title"],
             "channel_username": r["username"],
             "chain": chain or "all",
+            "chains": chains_map.get(r["id"], []) if chain is None else None,
             "total_calls": st["total_calls"],
             "wins": st["wins"],
             "win_rate": st["win_rate"],
@@ -313,6 +331,7 @@ def tokens(request):
     (desc). Each token carries its call entries in chronological order (order
     of call) with the calling channel and the multiplier that call achieved."""
     window = request.query_params.get("window", "all")
+    chain = _chain(request)
     conn = get_connection()
     since = W.window_since(window)
 
@@ -326,6 +345,9 @@ def tokens(request):
         WHERE c.status IN ('win', 'loss')
     """
     params = []
+    if chain:
+        q += " AND c.chain = ?"
+        params.append(chain)
     if since:
         q += " AND c.call_timestamp >= ?"
         params.append(since.replace(microsecond=0).isoformat() + "Z")

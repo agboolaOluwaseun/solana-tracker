@@ -27,6 +27,8 @@ function toCard(c: ApiChannel): ChannelCardData {
     title: c.title,
     username: c.username,
     avatar_url: initialsAvatar(c.title),
+    chain: c.chain,
+    chains: c.chains,
     total_calls: c.total_calls,
     win_rate: Math.round(c.win_rate ?? 0),
     avg_multiplier: c.avg_peak_profit_pct != null ? Math.round(100 * (1 + c.avg_peak_profit_pct / 100)) / 100 : 0,
@@ -36,7 +38,7 @@ function toCard(c: ApiChannel): ChannelCardData {
 }
 
 export default function HomePage() {
-  const { channelTab, setChannelTab, timeWindow, setTimeWindow, searchQuery, setSearchQuery, strategy } = useUIStore();
+  const { channelTab, setChannelTab, timeWindow, setTimeWindow, searchQuery, setSearchQuery, strategy, chain } = useUIStore();
   const [channels, setChannels] = useState<ChannelCardData[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchingChannels, setFetchingChannels] = useState<FetchingChannel[]>([]);
@@ -104,7 +106,7 @@ export default function HomePage() {
             setFetchingChannels((prev) => prev.filter((ch) => ch.channel_id !== data.channel_id));
           } else if (data.status === "complete") {
             // Refresh the channel list
-            api.channels(apiStrategy(strategy), timeWindow).then((rows) => setChannels(rows.map(toCard)));
+            api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => setChannels(rows.map(toCard)));
           }
         }
       }
@@ -133,7 +135,7 @@ export default function HomePage() {
     let cancelled = false;
     setLoading(true);
     api
-      .channels(apiStrategy(strategy), timeWindow)
+      .channels(apiStrategy(strategy), timeWindow, chain)
       .then((rows) => {
         if (!cancelled) setChannels(rows.map(toCard));
       })
@@ -146,7 +148,7 @@ export default function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, [strategy, timeWindow]);
+  }, [strategy, timeWindow, chain]);
 
   const filtered = searchQuery
     ? channels.filter((c) =>
@@ -211,7 +213,7 @@ export default function HomePage() {
         <ChannelSelector 
           onFetch={() => {
             // Refresh channels after fetch
-            api.channels(apiStrategy(strategy), timeWindow).then((rows) => setChannels(rows.map(toCard)));
+            api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => setChannels(rows.map(toCard)));
           }}
           onFetchingChange={(fetching) => {
             setFetchingChannels(fetching);

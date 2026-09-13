@@ -8,7 +8,7 @@ import { useUIStore } from "@/store/uiStore";
 import { api, ApiToken } from "@/lib/api";
 
 export default function TokensPage() {
-  const { timeWindow, setTimeWindow } = useUIStore();
+  const { timeWindow, setTimeWindow, chain } = useUIStore();
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -17,7 +17,7 @@ export default function TokensPage() {
     let cancelled = false;
     setLoading(true);
     api
-      .tokens(timeWindow)
+      .tokens(timeWindow, chain)
       .then((data) => {
         if (!cancelled) setTokens(data);
       })
@@ -30,7 +30,7 @@ export default function TokensPage() {
     return () => {
       cancelled = true;
     };
-  }, [timeWindow]);
+  }, [timeWindow, chain]);
 
   const filtered = searchQuery
     ? tokens.filter((t) =>

@@ -4,6 +4,8 @@ import { motion } from "framer-motion";
 import { Check, Flame } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { ChannelCardData } from "@/types";
+import ChainBadges from "./ChainBadges";
+import { useUIStore } from "@/store/uiStore";
 
 interface ChannelCardProps {
   channel: ChannelCardData;
@@ -12,6 +14,19 @@ interface ChannelCardProps {
 
 export default function ChannelCard({ channel, index }: ChannelCardProps) {
   const router = useRouter();
+  const globalChain = useUIStore((s) => s.chain);
+  const setDeepDiveChain = useUIStore((s) => s.setDeepDiveChain);
+
+  const open = () => {
+    if (globalChain !== "all") {
+      setDeepDiveChain(globalChain);
+    } else {
+      // Under merged "all" scope, a single-chain card's own chain wins.
+      const ch = channel.chains;
+      setDeepDiveChain(ch && ch.length === 1 ? (ch[0] as never) : "all");
+    }
+    router.push(`/channels/${channel.username || channel.channel_id}`);
+  };
 
   return (
     <motion.div
@@ -19,7 +34,7 @@ export default function ChannelCard({ channel, index }: ChannelCardProps) {
       animate={{ opacity: 1, scale: 1 }}
       transition={{ delay: index * 0.05 }}
       className="card group cursor-pointer p-6"
-      onClick={() => router.push(`/channels/${channel.username || channel.channel_id}`)}
+      onClick={open}
     >
       {/* Avatar with halo */}
       <div className="mb-4 flex justify-center">
@@ -53,8 +68,9 @@ export default function ChannelCard({ channel, index }: ChannelCardProps) {
 
       {/* Info */}
       <div className="text-center">
-        <h3 className="mb-1 text-lg font-semibold text-[var(--text-primary)]">
+        <h3 className="mb-1 flex items-center justify-center gap-2 text-lg font-semibold text-[var(--text-primary)]">
           {channel.title}
+          {globalChain === "all" && <ChainBadges chains={channel.chains} />}
         </h3>
         <p className="mb-3 text-sm text-[var(--text-muted)]">
           @{channel.username}
