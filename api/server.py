@@ -371,6 +371,113 @@ async def fetch_stream(request: Request):
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
+# ── /api/refresh-stream ──────────────────────────────────────────────────────
+async def refresh_stream(request: Request):
+    """Stream progress updates for refreshing all channels from their last call to now.
+    POST body: {} (no parameters needed)
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+        from pipeline import run_backfill, Progress
+        
+        conn = get_connection()
+        
+        # Get all channels with their latest call timestamp
+        channels = conn.execute("""
+            SELECT c.id, c.telegram_channel_id, c.username, c.title,
+                   MAX(cal.call_timestamp) as last_call_ts
+            FROM channels c
+            LEFT JOIN calls cal ON cal.channel_id = c.id
+            GROUP BY c.id
+            ORDER BY c.title
+        """).fetchall()
+        
+        if not channels:
+            return JSONResponse({"success": False, "message": "No channels found"}, status_code=400)
+        
+        async def event_generator():
+            for row in channels:
+                # Send start event
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
+                
+                # Calculate window: from last call (or channel creation) to now
+                window_end = datetime.now(timezone.utc)
+                if row['last_call_ts']:
+                    # Parse the timestamp (it's stored as ISO string)
+                    window_start = datetime.fromisoformat(row['last_call_ts'].replace('Z', '+00:00'))
+                else:
+                    # No calls yet, use channel creation time or default to 7 days ago
+                    window_start = window_end - timedelta(days=7)
+                
+                # Skip if window is too small (less than 1 hour)
+                if (window_end - window_start).total_seconds() < 3600:
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': 0, 'message': 'Already up to date'})}\n\n"
+                    continue
+                
+                # Create progress queue
+                progress_queue = asyncio.Queue()
+                
+                def progress_cb(progress: Progress):
+                    asyncio.run_coroutine_threadsafe(
+                        progress_queue.put({
+                            'channel_id': row['id'],
+                            'status': 'progress',
+                            'stage': progress.stage,
+                            'scanned': progress.scanned,
+                            'found': progress.found,
+                            'total_calls': progress.total_calls,
+                            'message': progress.message,
+                        }),
+                        loop
+                    )
+                
+                loop = asyncio.get_event_loop()
+                
+                # Telethon ref: @username if public, else the numeric Telegram id
+                channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
+                
+                def run_sync():
+                    try:
+                        result = run_backfill(
+                            channel_ref=channel_ref,
+                            window_start=window_start.replace(tzinfo=None),
+                            window_end=window_end.replace(tzinfo=None),
+                            title=row["title"],
+                            username=row["username"],
+                            progress_cb=progress_cb,
+                        )
+                        return result
+                    except Exception as e:
+                        return e
+                
+                # Start backfill in thread
+                task = loop.run_in_executor(None, run_sync)
+                
+                # Stream progress updates
+                while not task.done():
+                    try:
+                        update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                        yield f"data: {json.dumps(update)}\n\n"
+                    except asyncio.TimeoutError:
+                        continue
+                
+                # Get final result
+                result = await task
+                
+                if isinstance(result, Exception):
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
+            
+            # Send completion
+            yield f"data: {json.dumps({'status': 'complete'})}\n\n"
+        
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+    
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
 # ── /api/fetch ───────────────────────────────────────────────────────────
 async def fetch_channels(request: Request):
     """Trigger a backfill for selected channels.
@@ -545,6 +652,7 @@ app = Starlette(routes=[
     Route("/api/channels/{handle}/streak", channel_streak),
     Route("/api/channels/{handle}/calls", channel_calls),
     Route("/api/fetch-stream", fetch_stream, methods=["POST"]),
+    Route("/api/refresh-stream", refresh_stream, methods=["POST"]),
     Route("/api/fetch", fetch_channels, methods=["POST"]),
     Route("/api/telegram-channels", telegram_channels),
     Route("/api/add-channels", add_channels, methods=["POST"]),
