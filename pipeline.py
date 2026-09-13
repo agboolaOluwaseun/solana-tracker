@@ -40,6 +40,7 @@ class Progress:
     found: int = 0
     priced: int = 0
     unpriceable: int = 0
+    immature: int = 0
     total_calls: int = 0
     message: str = ""
 
@@ -597,9 +598,15 @@ def run_backfill(
 
     # 1. FETCH ---------------------------------------------------------------
     fetched = []
+    progress.stage = "fetch"
+    progress.message = (
+        f"fetching messages starting from {window_start:%d %b %Y}"
+    )
+    progress_cb(progress)
     try:
         def on_scan(n):
             progress.scanned = n
+            progress.message = f"{n:,} messages scanned…"
             progress_cb(progress)
 
         fetch_window_sync = _import_fetch_window_sync()
@@ -675,6 +682,12 @@ def run_backfill(
         persist_parsed_call(channel_id, parsed, week_index, chain="robinhood")
     progress.found = deduped_count
     progress.total_calls = deduped_count
+    progress.message = (
+        f"running regex — {len(fetched):,} messages scanned, "
+        f"{deduped_count} token addresses found"
+        + (f" ({raw_count - deduped_count} pump-updates removed)"
+           if raw_count != deduped_count else "")
+    )
     progress_cb(progress)
     if raw_count != deduped_count:
         log.info(
@@ -708,6 +721,11 @@ def run_backfill(
         (channel_id,),
     ).fetchall()
     progress.total_calls = len(pending)
+    progress.message = (
+        f"{len(pending)} token calls found — checking pools via "
+        f"DexScreener + GeckoTerminal…"
+        if pending else "no new calls to price"
+    )
     log.info(
         "pricing %d pending calls for channel %s "
         "(tokens discovered: %s)",
@@ -745,6 +763,13 @@ def run_backfill(
                 )
             log.info("call %s immature (<%dh old) — deferred to startup maturation",
                      row["id"], int(maturity_hours()))
+            progress.immature += 1
+            progress.scanned = i
+            progress.message = (
+                f"[{i}/{len(pending)}] {int(maturity_hours())}h window not "
+                f"elapsed yet — deferred"
+            )
+            progress_cb(progress)
             continue
         chain = row["chain"] if has_chain else "sol"
         r7 = None
@@ -815,6 +840,11 @@ def run_backfill(
         progress.priced = priced
         progress.unpriceable = unpriceable
         progress.scanned = i
+        progress.message = (
+            f"pricing call {i}/{len(pending)} — "
+            f"{priced} priced, {unpriceable} not found"
+            + (f", {progress.immature} deferred" if progress.immature else "")
+        )
         progress_cb(progress)
 
     # 4. Post-pricing reconciliation by resolved identity: if two different
@@ -871,7 +901,11 @@ def run_backfill(
             )
 
     progress.stage = "done"
-    progress.message = "backfill complete"
+    progress.message = (
+        f"done — {priced} priced, {unpriceable} not found"
+        + (f", {progress.immature} awaiting 7d window" if progress.immature else "")
+        if pending else "done — no new calls"
+    )
     progress_cb(progress)
     return progress
 

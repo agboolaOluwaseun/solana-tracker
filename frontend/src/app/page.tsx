@@ -8,18 +8,11 @@ import ChannelTabs from "@/components/ChannelTabs";
 import TimeFilter from "@/components/TimeFilter";
 import ChannelSelector from "@/components/ChannelSelector";
 import { useUIStore } from "@/store/uiStore";
-import { api, apiStrategy, ApiChannel, initialsAvatar } from "@/lib/api";
+import { useFetchStore } from "@/store/fetchStore";
+import { consumeSse } from "@/lib/sse";
+import { api, apiStrategy, ApiChannel, initialsAvatar, API_BASE } from "@/lib/api";
 import { sortChannels } from "@/lib/sortChannels";
 import type { ChannelCardData } from "@/types";
-
-interface FetchingChannel {
-  channel_id: number;
-  title: string;
-  stage: string;
-  scanned: number;
-  found: number;
-  total_calls: number;
-}
 
 function toCard(c: ApiChannel): ChannelCardData {
   return {
@@ -41,81 +34,52 @@ export default function HomePage() {
   const { channelTab, setChannelTab, timeWindow, setTimeWindow, searchQuery, setSearchQuery, strategy, chain } = useUIStore();
   const [channels, setChannels] = useState<ChannelCardData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [fetchingChannels, setFetchingChannels] = useState<FetchingChannel[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const tasks = useFetchStore((s) => s.tasks);
+  const active = useFetchStore((s) => s.active);
+  const beginRun = useFetchStore((s) => s.beginRun);
+  const applyEvent = useFetchStore((s) => s.applyEvent);
+  const endRun = useFetchStore((s) => s.endRun);
+  const clearFinished = useFetchStore((s) => s.clearFinished);
 
   const activeTab = channelTab || "Hot";
 
+  const reloadChannels = () =>
+    api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => {
+      setChannels(rows.map(toCard));
+      clearFinished();
+    });
+
   const handleRefresh = async () => {
     setRefreshing(true);
-    setFetchingChannels([]);
-    
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/refresh-stream", {
+      const response = await fetch(`${API_BASE}/api/refresh-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      
-      if (!response.ok) {
-        throw new Error(`API ${response.status}`);
-      }
-      
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      
-      if (!reader) throw new Error("No response body");
-      
-      let updatedChannels = 0;
-      
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        const text = decoder.decode(value);
-        const lines = text.split("\n").filter((line) => line.startsWith("data: "));
-        
-        for (const line of lines) {
-          const data = JSON.parse(line.substring(6));
-          
-          if (data.status === "start") {
-            setFetchingChannels((prev) => [
-              ...prev,
-              {
-                channel_id: data.channel_id,
-                title: data.title,
-                stage: "fetch",
-                scanned: 0,
-                found: 0,
-                total_calls: 0,
-              },
-            ]);
-          } else if (data.status === "progress") {
-            setFetchingChannels((prev) =>
-              prev.map((ch) =>
-                ch.channel_id === data.channel_id
-                  ? { ...ch, stage: data.stage, scanned: data.scanned, found: data.found, total_calls: data.total_calls }
-                  : ch
-              )
-            );
-          } else if (data.status === "done") {
-            updatedChannels++;
-            setFetchingChannels((prev) => prev.filter((ch) => ch.channel_id !== data.channel_id));
-          } else if (data.status === "error") {
-            setFetchingChannels((prev) => prev.filter((ch) => ch.channel_id !== data.channel_id));
-          } else if (data.status === "complete") {
-            // Refresh the channel list
-            api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => setChannels(rows.map(toCard)));
-          }
+      if (!response.ok) throw new Error(`API ${response.status}`);
+
+      let updated = 0;
+      await consumeSse(response, (data) => {
+        if (data.status === "queue") {
+          // Whole list up front → every channel shows a Queued card now;
+          // they flip to Running sequentially as the server reaches them.
+          beginRun(data.channels ?? []);
+        } else if (data.status === "done") {
+          updated++;
+          applyEvent(data);
+        } else if (data.status === "complete") {
+          reloadChannels();
+        } else {
+          applyEvent(data);
         }
-      }
-      
+      });
       setToast({
         type: "success",
-        message: `✓ Updated ${updatedChannels} channel${updatedChannels !== 1 ? "s" : ""} with new data`,
+        message: `✓ Updated ${updated} channel${updated !== 1 ? "s" : ""} with new data`,
       });
-      
       setTimeout(() => setToast(null), 5000);
     } catch (error) {
       console.error("Refresh failed:", error);
@@ -125,8 +89,12 @@ export default function HomePage() {
       });
       setTimeout(() => setToast(null), 5000);
     } finally {
-      setRefreshing(false);
-      setFetchingChannels([]);
+      endRun();
+      // Small grace so the "done" cards are readable before the real ones swap in.
+      setTimeout(() => {
+        reloadChannels();
+        setRefreshing(false);
+      }, 1200);
     }
   };
 
@@ -159,7 +127,7 @@ export default function HomePage() {
 
   // A channel currently being fetched is represented by its LoadingCard at
   // the end of the grid — hide its regular card so it never shows twice.
-  const fetchingIds = new Set(fetchingChannels.map((f) => f.channel_id));
+  const fetchingIds = new Set(tasks.map((f) => f.channel_id));
   const visibleChannels = sortedChannels.filter((c) => !fetchingIds.has(c.channel_id));
 
   return (
@@ -203,22 +171,14 @@ export default function HomePage() {
         </button>
         <button
           onClick={handleRefresh}
-          disabled={refreshing}
+          disabled={refreshing || active}
           className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--border-hover)] hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
           title="Refresh all channels with new data since last fetch"
         >
           <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
           {refreshing ? "Refreshing..." : "Refresh All"}
         </button>
-        <ChannelSelector 
-          onFetch={() => {
-            // Refresh channels after fetch
-            api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => setChannels(rows.map(toCard)));
-          }}
-          onFetchingChange={(fetching) => {
-            setFetchingChannels(fetching);
-          }}
-        />
+        <ChannelSelector onFetch={reloadChannels} />
         <TimeFilter value={timeWindow} onChange={setTimeWindow} />
       </div>
 
@@ -230,7 +190,7 @@ export default function HomePage() {
         <p className="py-20 text-center text-[var(--text-muted)]">Loading channels…</p>
       ) : (
         <>
-          {sortedChannels.length === 0 && fetchingChannels.length === 0 ? (
+          {sortedChannels.length === 0 && tasks.length === 0 ? (
             <p className="py-20 text-center text-[var(--text-muted)]">
               No channels yet. Run a backfill to populate data.
             </p>
@@ -241,15 +201,8 @@ export default function HomePage() {
               ))}
               {/* Loading cards render at the END of the same grid, so a new
                   channel appears as the last square — never above the rest. */}
-              {fetchingChannels.map((ch) => (
-                <LoadingCard
-                  key={`fetching-${ch.channel_id}`}
-                  title={ch.title}
-                  stage={ch.stage}
-                  scanned={ch.scanned}
-                  found={ch.found}
-                  totalCalls={ch.total_calls}
-                />
+              {tasks.map((t) => (
+                <LoadingCard key={`fetching-${t.channel_id}`} task={t} />
               ))}
             </div>
           )}

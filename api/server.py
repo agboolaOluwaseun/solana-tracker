@@ -462,6 +462,9 @@ async def fetch_stream(request: Request):
                             'stage': progress.stage,
                             'scanned': progress.scanned,
                             'found': progress.found,
+                            'priced': progress.priced,
+                            'unpriceable': progress.unpriceable,
+                            'immature': progress.immature,
                             'total_calls': progress.total_calls,
                             'message': progress.message,
                         }),
@@ -541,6 +544,10 @@ async def refresh_stream(request: Request):
             return JSONResponse({"success": False, "message": "No channels found"}, status_code=400)
         
         async def event_generator():
+            # Announce the full queue up front so the UI can render every
+            # channel as 'queued' immediately, then flip them to 'running'
+            # one-by-one as this loop reaches each (sequential execution).
+            yield f"data: {json.dumps({'status': 'queue', 'channels': [{'channel_id': r['id'], 'title': r['title']} for r in channels]})}\n\n"
             for row in channels:
                 # Send start event
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
@@ -570,6 +577,9 @@ async def refresh_stream(request: Request):
                             'stage': progress.stage,
                             'scanned': progress.scanned,
                             'found': progress.found,
+                            'priced': progress.priced,
+                            'unpriceable': progress.unpriceable,
+                            'immature': progress.immature,
                             'total_calls': progress.total_calls,
                             'message': progress.message,
                         }),
