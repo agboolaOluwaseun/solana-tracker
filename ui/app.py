@@ -263,7 +263,7 @@ def run_backfill_action(channel_ref: str, preset: str, title: str | None = None)
     preset: one of pipeline.PRESET_KEYS (1d..5m). The window is anchored to the
     period boundary (see pipeline.preset_window).
     """
-    from pipeline import Progress, run_backfill, preset_window
+    from pipeline import Progress, run_backfill, preset_window, pause_rescoring
 
     start_dt, end_dt = preset_window(preset)
     username = channel_ref.lstrip("@") if channel_ref.startswith("@") else None
@@ -310,14 +310,17 @@ def run_backfill_action(channel_ref: str, preset: str, title: str | None = None)
                 status.update(label=f"❌ {msg}", state="error", expanded=True)
 
     try:
-        run_backfill(
-            channel_ref=channel_ref,
-            window_start=start_dt,
-            window_end=end_dt,
-            username=username,
-            title=title,
-            progress_cb=cb,
-        )
+        # The background rescore thread (if running) pauses on this context
+        # and resumes automatically once the backfill completes.
+        with pause_rescoring():
+            run_backfill(
+                channel_ref=channel_ref,
+                window_start=start_dt,
+                window_end=end_dt,
+                username=username,
+                title=title,
+                progress_cb=cb,
+            )
     except Exception as e:
         status.update(label=f"❌ {e}", state="error")
     finally:
@@ -559,8 +562,14 @@ def _start_bg_price_update() -> None:
     def _worker():
         try:
             from pipeline import mature_pending_calls, rescore_live_calls
+
+            def _note(p):
+                # Bump the generation on every progress event so the page
+                # reruns as calls land — not just once at the end.
+                _BG["gen"] += 1
+
             n = mature_pending_calls()  # legacy lane; no-op under 7d engine
-            n2 = rescore_live_calls()
+            n2 = rescore_live_calls(progress_cb=_note)
             _BG["note"] = (f"{n + n2} call(s) updated" if (n or n2) else "all current")
         except Exception as e:
             log.warning("background price update failed: %s", e)

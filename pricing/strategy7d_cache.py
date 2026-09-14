@@ -6,12 +6,17 @@ Wraps a GeckoTerminalClientV2 (any network) + a SQLite connection on the unified
 and returns (fetch_hourly, fetch_minute) callables matching the injected-fetcher
 contract of pricing/strategy7d.py.
 
-Caching rule (frozen spec step 11):
-  - Minute candles: fully cached — re-runs are free.
-  - Hourly candles: cached EXCEPT the call-hour candle (the window's first
-    candle). It is ambiguous (contains pre-call movement), never trusted for
-    the final path, and never persisted; screening always refetches it, so a
-    re-run costs exactly one hourly request per call.
+Caching rules (frozen spec step 11, live-scoring amendments):
+  - Minute candles: fully cached — re-runs are free while complete.
+  - Hourly candles: fetched fresh every pass (screening needs the call-hour
+    candle as current as possible), then MERGED over cached copies (fresh wins
+    per timestamp). ALL candles including the call-hour candle are persisted:
+    if GeckoTerminal later prunes a dead pool (shitty tokens get delisted and
+    their candle history disappears), the finalization at day 7 still sees
+    every candle we observed during the window — the verdict is locked from
+    the best data captured, instead of collapsing to 'no call-hour candle'.
+    Fresh candles overwrite the stored partial call-hour candle every pass,
+    so the normal path stays spec-identical.
   - `client_v2.network` selects the chain network ('solana' | 'robinhood').
 """
 from __future__ import annotations
@@ -30,10 +35,13 @@ def _iso_ts(ts: datetime) -> str:
 
 
 def _row_to_point(r) -> PricePoint:
+    # Works with dict rows (db.py row_factory) AND plain tuples in the
+    # SELECT's column order: candle_ts, open, high, low, close, volume.
+    get = (lambda k, i: r[k]) if hasattr(r, "keys") else (lambda k, i: r[i])
     return PricePoint(
-        timestamp=datetime.fromisoformat(r["candle_ts"].replace("Z", "")),
-        open=r["open"], high=r["high"], low=r["low"],
-        close=r["close"], volume=r["volume"],
+        timestamp=datetime.fromisoformat(get("candle_ts", 0).replace("Z", "")),
+        open=get("open", 1), high=get("high", 2), low=get("low", 3),
+        close=get("close", 4), volume=get("volume", 5),
     )
 
 
@@ -92,14 +100,31 @@ def make_cached_fetchers(conn, client_v2) -> Tuple[Fetcher, Fetcher]:
         return out, reqs
 
     def fetch_hourly(pool: str, token: str, start: datetime, end: datetime) -> Tuple[List[PricePoint], int]:
-        """Hourly candles for [start,end). Cache stores ALL EXCEPT the first
-        (call-hour) candle — screening always needs it fresh, so re-runs keep
-        costing exactly one hourly request per call."""
+        """Hourly candles for [start,end), fresh fetch UNION cached copies.
+
+        Fresh wins on timestamp collisions; cached candles survive even when
+        the API has already pruned them (dead-pool finalization), so a day-7
+        verdict uses everything ever observed in the window. Persisting the
+        call-hour candle too (every pass refreshes it) is what enables the
+        fallback; the screening test still runs on the freshest copy.
+        """
         pool = _strip_network_prefix(pool, client_v2.network)
-        candles, reqs = _fetch_span(pool, token, "hour", start, end)
-        # persist everything except the first (call-hour) candle
+        try:
+            candles, reqs = _fetch_span(pool, token, "hour", start, end)
+        except Exception:
+            # API error (deleted pool often 404s): fall back to cached data
+            # rather than losing a window we spent budget observing.
+            cached = load_cached(pool, token, "hour", start, end)
+            if cached:
+                return cached, 1
+            raise
         if candles:
-            store_candles(pool, token, "hour", candles[1:])
-        return candles, reqs
+            store_candles(pool, token, "hour", candles)
+        cached = load_cached(pool, token, "hour", start, end)
+        if not cached:
+            return candles, reqs
+        merged = {_iso_ts(c.timestamp): c for c in cached + candles}
+        out = [merged[k] for k in sorted(merged)]
+        return out, reqs
 
     return fetch_hourly, fetch_minute

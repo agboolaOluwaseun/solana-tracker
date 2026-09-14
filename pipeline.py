@@ -11,7 +11,9 @@ Progress is reported via an optional callback so the UI can stream it.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -24,6 +26,45 @@ from pricing.backtest import backtest_call, upsert_token_meta
 from pricing.geckoterminal import GeckoTerminalClient
 
 log = logging.getLogger(__name__)
+
+# Live rescore concurrency state (see rescore_live_calls / pause_rescoring).
+_RESCORE_LOCK = threading.Lock()
+_RESCORE_RUNNING = False
+_RESCORE_RERUN = False
+_RESCORE_PAUSE = threading.Event()
+_RESCORE_PAUSE.set()  # set = allowed to run; fetch streams clear it
+
+
+_PAUSE_DEPTH = 0
+
+
+@contextlib.contextmanager
+def pause_rescoring():
+    """Ref-counted: the background rescore checks the pause between calls and
+    waits while any user-initiated backfill runs, then resumes automatically.
+    User fetch always outranks opportunistic refresh; a stream must never run
+    its own end-of-stream rescore while paused (it runs after leaving this)."""
+    global _PAUSE_DEPTH
+    with _RESCORE_LOCK:
+        _PAUSE_DEPTH += 1
+        _RESCORE_PAUSE.clear()
+    try:
+        yield
+    finally:
+        with _RESCORE_LOCK:
+            _PAUSE_DEPTH -= 1
+            if _PAUSE_DEPTH == 0:
+                _RESCORE_PAUSE.set()
+
+
+def run_backfill_guarded(*args, **kwargs) -> Progress:
+    """run_backfill wrapped so the background rescore yields to it."""
+    with pause_rescoring():
+        return run_backfill(*args, **kwargs)
+
+
+def rescore_paused() -> bool:
+    return not _RESCORE_PAUSE.is_set()
 
 
 def _import_fetch_window_sync():
@@ -238,21 +279,52 @@ def rescore_live_calls(progress_cb: ProgressCb = _noop,
                        limit: Optional[int] = None) -> int:
     """Re-score every 'live' 7d call through the SAME engine with the
     evaluation window extended toward `now` (and pick up 'waiting_for_data'
-    rows whose market data may exist by now).
+    rows whose market data may exist by now; and 'live' win/loss rows whose
+    window has since elapsed — those get their FINAL verdict here).
 
-    Called on app startup (next to mature_pending_calls) AND at the end of
-    every run_backfill/refresh pass, so a call's provisional verdict tracks
-    the newest candle every time the user refreshes. No per-day cap: cost is
-    bounded by construction — closed candles come from price_cache, and a
-    fresh hourly fetch happens only while the call's window is still open.
-    Rows whose 7d window has now elapsed get their FINAL verdict here and
-    leave the live set forever (spec outcomes for those are identical to the
-    frozen 1-request screening + deep-dive path).
+    Concurrency (three layers):
+      * one-pass-only guard: a second concurrent call skips and flags the
+        running pass to sweep AGAIN after it finishes (no duplicate fetches,
+        nothing missed).
+      * pipeline.pause_rescoring(): fetch/refresh streams set this while
+        they run, so a background pass pauses BETWEEN CALLS until the
+        backfill completes, then resumes — the user's explicit fetch always
+        outranks the opportunistic refresh.
+      * WAL readers (UI/API stats) are never blocked regardless.
+
+    No per-day cap: cost is bounded by construction — closed candles come
+    from price_cache, and a fresh hourly fetch happens only while a call's
+    window is still open OR when it is being finalized.
 
     Returns the number of calls updated.
     """
     if settings.pricing_engine != "7d" or not _calls_has_chain_column():
         return 0  # legacy engine: immature rows go through mature_pending_calls
+    global _RESCORE_RUNNING, _RESCORE_RERUN
+    with _RESCORE_LOCK:
+        if _RESCORE_RUNNING:
+            _RESCORE_RERUN = True   # sweep again when the running pass ends
+            log.info("rescore already running — skipped (rerun flagged)")
+            return 0
+        _RESCORE_RUNNING = True
+    try:
+        total_updated = 0
+        while True:
+            with _RESCORE_LOCK:
+                _RESCORE_RERUN = False
+            n = _rescore_pass_once(progress_cb, limit)
+            total_updated += n
+            with _RESCORE_LOCK:
+                if not _RESCORE_RERUN:
+                    break
+            log.info("rescore: new work flagged during pass — sweeping again")
+        return total_updated
+    finally:
+        with _RESCORE_LOCK:
+            _RESCORE_RUNNING = False
+
+
+def _rescore_pass_once(progress_cb: ProgressCb, limit: Optional[int]) -> int:
     init_db()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     conn = get_connection()
@@ -269,12 +341,16 @@ def rescore_live_calls(progress_cb: ProgressCb = _noop,
         "WHERE score_state = 'live' AND status = 'pending' "
         "ORDER BY call_timestamp ASC"
     ).fetchall()
+    # Second lane: live rows that already carry a provisional verdict.
+    # NO window filter here — still-open rows get extended verdicts (new
+    # candles; status may flip), and rows whose window has elapsed get
+    # their FINAL verdict on this pass and leave the live set. An
+    # 'evaluation_end_timestamp > now' filter would silently strand every
+    # elapsed live row in 'live' forever.
     rows += conn.execute(
         "SELECT id, token_address, call_timestamp, chain FROM calls "
         "WHERE score_state = 'live' AND status IN ('win','loss') "
-        "AND evaluation_end_timestamp > ? "
-        "ORDER BY call_timestamp ASC",
-        (_iso(now),),
+        "ORDER BY call_timestamp ASC"
     ).fetchall()
     if limit:
         rows = rows[:limit]
@@ -284,6 +360,10 @@ def rescore_live_calls(progress_cb: ProgressCb = _noop,
     client = GeckoTerminalClient()
     updated = 0
     for i, row in enumerate(rows, start=1):
+        # Yield to user-initiated backfills: block HERE (on this same row)
+        # until the fetch/refresh stream finishes, then continue normally.
+        while not _RESCORE_PAUSE.wait(timeout=300):
+            log.info("rescore waiting on active fetch stream (%ds)…", 300)
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
         live_now = now if now < call_ts + timedelta(days=settings.eval_days) else None
         chain = row["chain"] or "sol"

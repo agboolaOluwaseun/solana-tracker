@@ -180,6 +180,78 @@ def test_price_one_call_forwards_now(monkeypatch):
     assert r7c.window_complete is True and r7c.status_plain == "win"
 
 
+# ---- 1c. Cache fetchers: dead-pool pruning rescue (user scenario) ---------
+# Token pool visible for ~3 days, then GeckoTerminal stops serving its
+# history (delisted/dead). Live passes captured candles into price_cache as
+# they appeared; the day-7 finalization must score from everything EVER
+# captured, not collapse because the API no longer returns it.
+
+def test_fetchers_survive_api_pruning(tmp_path):
+    import sqlite3 as _sq
+
+    from pricing.strategy7d_cache import make_cached_fetchers
+
+    db = tmp_path / "c.db"
+    conn = _sq.connect(db)
+    conn.executescript("""
+        CREATE TABLE price_cache (
+            pool_address TEXT NOT NULL, token_address TEXT NOT NULL,
+            aggregate TEXT NOT NULL, candle_ts TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume REAL,
+            PRIMARY KEY (pool_address, token_address, aggregate, candle_ts)
+        );
+    """)
+
+    # Full observed window: quiet days 0-1, 2x pump at hour 30.
+    full = [hourly(HOUR_START + timedelta(hours=k),
+                   2.2 if k == 30 else 1.4,
+                   1.0 if k == 30 else 0.9) for k in range(72)]
+
+    class FakeGT:
+        network = "solana"
+        def __init__(self):
+            self.mode = "full"      # -> "pruned" -> "gone"
+        def _request(self, path, params):
+            if self.mode == "gone":
+                raise RuntimeError("404 Pool not found")
+            # GT returns the LAST 1000 candles before before_timestamp;
+            # 'pruned' simulates the API dropping old history after 24h.
+            src = full if self.mode == "full" else [c for c in full
+                                                    if c.timestamp >= HOUR_START + timedelta(hours=24)]
+            return {"data": {"attributes": {"ohlcv_list": [
+                [int(c.timestamp.timestamp()), c.open, c.high, c.low, c.close, c.volume]
+                for c in src]}}}
+
+    gt = FakeGT()
+    fetch_hourly, _ = make_cached_fetchers(conn, gt)
+    end7 = CALL_TS + timedelta(days=7)
+
+    # Day-2 live pass: captures the quiet start + (not yet) the pump.
+    day2 = [c for c in full if c.timestamp < HOUR_START + timedelta(hours=24)]
+    pruned_src_backup = list(full)
+    del full[:]
+    full.extend(day2)
+    hs, _reqs = fetch_hourly(POOL, TOKEN, HOUR_START, CALL_TS + timedelta(days=2))
+    assert any(c.timestamp == HOUR_START for c in hs)      # screening data ok
+    # Days 2-3 pass captures the pump BEFORE the API prunes history.
+    del full[:]
+    full.extend(pruned_src_backup)
+    hs2, _ = fetch_hourly(POOL, TOKEN, HOUR_START, CALL_TS + timedelta(days=3))
+    pump = [c for c in hs2 if c.high >= 2.0]
+    assert pump, "pump hour captured live"
+
+    # Pool now deleted: API returns 404 for everything.
+    del full[:]
+    full.extend(pruned_src_backup)
+    gt.mode = "gone"
+    hs3, _ = fetch_hourly(POOL, TOKEN, HOUR_START, end7)
+    # Day-7 finalization: rescue entirely from cache — call-hour present and
+    # the day-3 pump still visible even though the API has nothing left.
+    assert any(c.timestamp == HOUR_START for c in hs3), "call-hour from cache"
+    assert any(c.high >= 2.0 for c in hs3), "pump from cache survives pruning"
+    conn.close()
+
+
 # ---- 2. Pipeline lifecycle (scratch DB, faked fetch + pricing) ------------
 
 SOL = "3TYgKwkE2Y3rxdw9osLRSpxpXmSC1C1oo19W9KHspump"

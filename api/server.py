@@ -519,15 +519,18 @@ async def fetch_stream(request: Request):
                 channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
             
                 def run_sync():
+                    # Background rescore yields to user-initiated backfills.
+                    from pipeline import pause_rescoring
                     try:
-                        result = run_backfill(
-                            channel_ref=channel_ref,
-                            window_start=window_start.replace(tzinfo=None),
-                            window_end=window_end.replace(tzinfo=None),
-                            title=row["title"],
-                            username=row["username"],
-                            progress_cb=progress_cb,
-                        )
+                        with pause_rescoring():
+                            result = run_backfill(
+                                channel_ref=channel_ref,
+                                window_start=window_start.replace(tzinfo=None),
+                                window_end=window_end.replace(tzinfo=None),
+                                title=row["title"],
+                                username=row["username"],
+                                progress_cb=progress_cb,
+                            )
                         return result
                     except Exception as e:
                         return e
@@ -644,15 +647,18 @@ async def refresh_stream(request: Request):
                 channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
                 
                 def run_sync():
+                    # Background rescore yields to user-initiated backfills.
+                    from pipeline import pause_rescoring
                     try:
-                        result = run_backfill(
-                            channel_ref=channel_ref,
-                            window_start=window_start.replace(tzinfo=None),
-                            window_end=window_end.replace(tzinfo=None),
-                            title=row["title"],
-                            username=row["username"],
-                            progress_cb=progress_cb,
-                        )
+                        with pause_rescoring():
+                            result = run_backfill(
+                                channel_ref=channel_ref,
+                                window_start=window_start.replace(tzinfo=None),
+                                window_end=window_end.replace(tzinfo=None),
+                                title=row["title"],
+                                username=row["username"],
+                                progress_cb=progress_cb,
+                            )
                         return result
                     except Exception as e:
                         return e
@@ -744,14 +750,16 @@ async def fetch_channels(request: Request):
             channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
             
             try:
-                # Run backfill for this channel
-                progress = run_backfill(
-                    channel_ref=channel_ref,
-                    window_start=window_start.replace(tzinfo=None),
-                    window_end=window_end.replace(tzinfo=None),
-                    title=row["title"],
-                    username=row["username"],
-                )
+                # Run backfill for this channel (background rescore yields)
+                from pipeline import pause_rescoring
+                with pause_rescoring():
+                    progress = run_backfill(
+                        channel_ref=channel_ref,
+                        window_start=window_start.replace(tzinfo=None),
+                        window_end=window_end.replace(tzinfo=None),
+                        title=row["title"],
+                        username=row["username"],
+                    )
                 results.append({
                     "channel_id": channel_id,
                     "success": True,
