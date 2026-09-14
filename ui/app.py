@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -536,6 +537,54 @@ def _get_db_channels() -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Background price update (startup / gap-catch-up)
+#
+# rescore_live_calls / mature_pending_calls can take minutes when you were
+# away a while (API budget). They must NOT block the first render: they run
+# once per server process in a daemon thread (thread-local DB connections
+# make that safe), while a 5s fragment watches the generation counter and
+# reruns the whole page the moment new numbers land — no manual refresh.
+# ──────────────────────────────────────────────────────────────────────────
+_BG = {"started": False, "running": False, "gen": 0, "note": ""}
+_BG_LOCK = threading.Lock()
+
+
+def _start_bg_price_update() -> None:
+    with _BG_LOCK:
+        if _BG["started"]:
+            return
+        _BG["started"] = True
+        _BG["running"] = True
+
+    def _worker():
+        try:
+            from pipeline import mature_pending_calls, rescore_live_calls
+            n = mature_pending_calls()  # legacy lane; no-op under 7d engine
+            n2 = rescore_live_calls()
+            _BG["note"] = (f"{n + n2} call(s) updated" if (n or n2) else "all current")
+        except Exception as e:
+            log.warning("background price update failed: %s", e)
+            _BG["note"] = f"update failed: {e}"
+        finally:
+            _BG["running"] = False
+            _BG["gen"] += 1
+
+    threading.Thread(target=_worker, name="price-update", daemon=True).start()
+
+
+@st.fragment(run_every="5s")
+def _price_update_watcher() -> None:
+    """Invisible poller: reruns the whole page when the background thread
+    finishes, so refreshed prices appear without touching anything."""
+    seen = st.session_state.get("_bg_price_gen", 0)
+    if _BG["running"]:
+        st.caption("⟳ Updating live call prices in the background…")
+    elif seen != _BG["gen"]:
+        st.session_state["_bg_price_gen"] = _BG["gen"]
+        st.rerun(scope="app")
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────
 def main() -> None:
@@ -543,26 +592,13 @@ def main() -> None:
     st.markdown(_THEME_CSS, unsafe_allow_html=True)
     _hero_html()
 
-    # Silently finalize any immature pending calls whose 12h window has now
-    # elapsed (they were deferred during a previous run).
-    try:
-        from pipeline import mature_pending_calls
-        n_matured = mature_pending_calls()
-        if n_matured:
-            st.toast(f"🕐 Priced {n_matured} previously immature call(s)")
-    except Exception as e:
-        log.warning("startup maturation failed: %s", e)
-
-    # 7d engine: refresh every provisional 'live' verdict with the newest
-    # candles (young calls keep moving toward their final verdict on each
-    # launch; rows whose window elapsed get finalized and leave the set).
-    try:
-        from pipeline import rescore_live_calls
-        n_live = rescore_live_calls()
-        if n_live:
-            st.toast(f"🔄 Updated {n_live} live call(s) with new price data")
-    except Exception as e:
-        log.warning("live rescore failed: %s", e)
+    # Finalization pass: fold any backlog immature rows into the live set,
+    # then price every live/waiting call whose 7d window has elapsed —
+    # full frozen-spec verdicts for >7-day calls, extended provisional
+    # verdicts for <7-day ones. Runs in the BACKGROUND so startup is
+    # instant; the watcher fragment reruns the page when new numbers land.
+    _start_bg_price_update()
+    _price_update_watcher()
 
     channel_ref, start_date, run_btn, title_hint = _render_sidebar()
 

@@ -172,7 +172,9 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
       const response = await fetch(`${API_BASE}/api/fetch-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel_ids: channelIds, days: 7 }),
+        // No days override: the server uses the standard 5-month window,
+        // same anchor as the historical backfill preset.
+        body: JSON.stringify({ channel_ids: channelIds }),
       });
       if (!response.ok) {
         throw new Error(`API ${response.status}`);
@@ -187,7 +189,7 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
         else if (data.status === "error") errorCount++;
       });
 
-      const finalMessage = `✓ Fetched ${successCount}/${channelIds.length} channel${channelIds.length !== 1 ? "s" : ""} (last 7 days)`;
+      const finalMessage = `✓ Fetched ${successCount}/${channelIds.length} channel${channelIds.length !== 1 ? "s" : ""} (5-month window)`;
       setStatus({ type: errorCount > 0 ? "error" : "success", message: finalMessage });
       showToast(errorCount > 0 ? "error" : "success", finalMessage);
 

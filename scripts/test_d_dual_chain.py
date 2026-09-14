@@ -20,7 +20,24 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 SCRATCH = Path(tempfile.gettempdir()) / "kolfi_d_test.db"
-shutil.copy(ROOT / "kolfi.db", SCRATCH)
+# Online backup (not raw file copy): kolfi.db may be mid-write from the API
+# server (WAL + background rescore). Retry to tolerate writer contention.
+SCRATCH.unlink(missing_ok=True)
+for _attempt in range(5):
+    try:
+        _src = sqlite3.connect(ROOT / "kolfi.db")
+        _dst = sqlite3.connect(SCRATCH)
+        with _dst:
+            _src.backup(_dst)
+        _src.close()
+        _dst.close()
+        break
+    except sqlite3.DatabaseError:
+        SCRATCH.unlink(missing_ok=True)
+        import time as _time
+        _time.sleep(1.0)
+else:
+    raise RuntimeError("could not snapshot kolfi.db after 5 attempts")
 os.environ["DB_PATH"] = str(SCRATCH)
 os.environ["SCHEMA_FILE"] = "schema_unified.sql"
 os.environ["PRICING_ENGINE"] = "7d"

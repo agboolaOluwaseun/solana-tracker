@@ -137,8 +137,8 @@ export const api = {
       `/api/channels/${encodeURIComponent(handle)}/tiers?chain=${chain}&strategy=${strategy}` +
       (days ? `&days=${days}` : `&window=${window}`),
     ),
-  fetch: (channelIds: number[], days: number) =>
-    post<{ success: boolean; results: Array<{ channel_id: number; success: boolean; message: string }> }>("/api/fetch", { channel_ids: channelIds, days }),
+  fetch: (channelIds: number[], days?: number) =>
+    post<{ success: boolean; results: Array<{ channel_id: number; success: boolean; message: string }> }>("/api/fetch", { channel_ids: channelIds, ...(days ? { days } : {}) }),
 };
 /** Map store strategy ("50"|"100") to API strategy ("stoploss"|"normal"). */
 export function apiStrategy(s: string): string {

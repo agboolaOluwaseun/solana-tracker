@@ -33,6 +33,32 @@ from analysis import windowed as W
 init_db()
 
 
+# ── startup background catch-up ─────────────────────────────────────────────
+# If the machine/app was closed for a while, reconcile provisional 'live'
+# calls the moment the API comes up: >7d rows get their FINAL frozen-spec
+# verdict, <7d rows get fresh provisional verdicts. Daemon thread so serving
+# starts immediately; WAL reads are never blocked by it.
+import threading as _threading
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    def _worker():
+        try:
+            from pipeline import mature_pending_calls, rescore_live_calls
+            mature_pending_calls()
+            rescore_live_calls()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("startup catch-up failed")
+
+    _threading.Thread(target=_worker, name="startup-catchup", daemon=True).start()
+    yield
+
+
 def _j(rows) -> JSONResponse:
     return JSONResponse(json.loads(json.dumps(rows, default=str)))
 
@@ -407,7 +433,12 @@ def tokens(request):
 # ── /api/fetch-stream ────────────────────────────────────────────────────────
 async def fetch_stream(request: Request):
     """Stream progress updates for channel fetching via SSE.
-    POST body: { "channel_ids": [12, 13], "days": 7 }
+    POST body: { "channel_ids": [12, 13], "days": 7? }
+
+    Window: the STANDARD 5-month anchor (preset_window('5m') = 1st of the
+    month 5 months back .. now) unless the client passes an explicit 'days'
+    override. Calls older than 7d get the frozen full-window verdict;
+    younger ones are scored live.
 
     No chain parameter needed: run_backfill parses Solana mints AND
     Robinhood 0x addresses from every message in one pass (Workstream D)
@@ -416,7 +447,7 @@ async def fetch_stream(request: Request):
     try:
         body = await request.json()
         channel_ids = body.get("channel_ids", [])
-        days = body.get("days", 7)
+        days = body.get("days")  # optional override; default = 5m preset
         
         if not channel_ids:
             return JSONResponse({"success": False, "message": "No channels selected"}, status_code=400)
@@ -447,9 +478,15 @@ async def fetch_stream(request: Request):
                 # Send start event
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
             
-                # Calculate window
-                window_end = datetime.now(timezone.utc)
-                window_start = window_end - timedelta(days=days)
+                # Calculate window: the STANDARD 5-month anchor (same start
+                # as the historical backfill preset), unless the client sends
+                # an explicit days override.
+                if days:
+                    window_end = datetime.now(timezone.utc).replace(tzinfo=None)
+                    window_start = window_end - timedelta(days=int(days))
+                else:
+                    from pipeline import preset_window
+                    window_start, window_end = preset_window("5m")
             
                 # Create progress queue
                 progress_queue = asyncio.Queue()
@@ -661,19 +698,20 @@ async def refresh_stream(request: Request):
 # ── /api/fetch ───────────────────────────────────────────────────────────
 async def fetch_channels(request: Request):
     """Trigger a backfill for selected channels.
-    POST body: { "channel_ids": [12, 13], "days": 7 }
+    POST body: { "channel_ids": [12, 13], "days": 7? }
+    No 'days' => standard 5-month anchor (same as fetch-stream).
     """
     try:
         body = await request.json()
         channel_ids = body.get("channel_ids", [])
-        days = body.get("days", 7)
-        
+        days = body.get("days")  # optional override; default = 5m preset
+
         if not channel_ids:
             return JSONResponse({"success": False, "message": "No channels selected"}, status_code=400)
-        
+
         from datetime import datetime, timedelta, timezone
-        from pipeline import run_backfill
-        
+        from pipeline import run_backfill, preset_window
+
         conn = get_connection()
         results = []
         
@@ -695,9 +733,12 @@ async def fetch_channels(request: Request):
                 results.append({"channel_id": channel_id, "success": False, "message": "Channel not found"})
                 continue
             
-            # Calculate window: last N days
-            window_end = datetime.now(timezone.utc)
-            window_start = window_end - timedelta(days=days)
+            # Calculate window: standard 5-month anchor unless 'days' given
+            if days:
+                window_end = datetime.now(timezone.utc).replace(tzinfo=None)
+                window_start = window_end - timedelta(days=int(days))
+            else:
+                window_start, window_end = preset_window("5m")
             
             # Telethon ref: @username if public, else the numeric Telegram id
             channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
@@ -837,7 +878,7 @@ app = Starlette(routes=[
     Route("/api/fetch", fetch_channels, methods=["POST"]),
     Route("/api/telegram-channels", telegram_channels),
     Route("/api/add-channels", add_channels, methods=["POST"]),
-])
+], lifespan=_lifespan)
 
 # The Next.js dev/prod server runs on :3000 and the browser fetches these
 # endpoints cross-origin, so CORS must be enabled for every frontend call.

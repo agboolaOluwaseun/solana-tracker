@@ -256,6 +256,7 @@ def rescore_live_calls(progress_cb: ProgressCb = _noop,
     init_db()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     conn = get_connection()
+    # Thread-local connections: safe to run from a background thread.
     # Backlog migration: rows deferred as 'immature_window' under the older
     # semantics are exactly what 'live' means now — a young call whose 7d
     # window is still open. Fold them into the live set (one-time, cheap).
