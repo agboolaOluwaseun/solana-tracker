@@ -95,6 +95,54 @@ def _noop(_p: Progress) -> None:
     pass
 
 
+def _spawn_photo_fetch(channel_db_id: int, channel_ref: str) -> None:
+    """Fire-and-forget: fetch a new channel's Telegram profile photo into
+    frontend/public/channel_photos/<db_id>.jpg (the URL ChannelCard renders).
+
+    Daemon thread: a slow/failed Telegram call never stalls the backfill,
+    and a channel that ends up without a photo simply keeps the initials
+    fallback. scripts/download_channel_photos.py covers older channels.
+    """
+    import os
+    from config import PROJECT_ROOT
+
+    photo = (PROJECT_ROOT / "frontend" / "public" / "channel_photos"
+             / f"{channel_db_id}.jpg")
+    if photo.exists():
+        return
+
+    def _worker():
+        try:
+            import asyncio
+            from ingestion.telethon_fetcher import build_client, _resolve_entity
+
+            async def _get():
+                client = build_client()
+                await client.connect()
+                try:
+                    if not await client.is_user_authorized():
+                        return None
+                    ent = await _resolve_entity(client, channel_ref)
+                    photo.parent.mkdir(parents=True, exist_ok=True)
+                    # extension-less stem: Telethon appends the real suffix
+                    # and returns the final path -> rename to <id>.jpg.
+                    stem = str(photo.parent / f"_{channel_db_id}_tmp")
+                    return await client.download_profile_photo(  # type: ignore[arg-type]
+                        ent, file=stem, download_big=True)
+                finally:
+                    await client.disconnect()  # type: ignore[misc]
+
+            path = asyncio.run(_get())
+            if path and os.path.exists(path):
+                os.replace(path, photo)
+                log.info("channel photo saved: %s", photo.name)
+        except Exception as e:
+            log.info("photo fetch skipped for %s: %s", channel_ref, e)
+
+    threading.Thread(target=_worker, name=f"photo-{channel_db_id}",
+                     daemon=True).start()
+
+
 def _iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat() + "Z"
 
@@ -841,6 +889,14 @@ def run_backfill(
     # Resolve channel id from fetched messages (all share the same source id).
     tg_id = fetched[0].channel_id if fetched else abs(hash(channel_ref)) % (10 ** 12)
     channel_id = ensure_channel(channel_ref, tg_id, title or fetched_title, username, window_start, window_end)
+
+    # New channels need a card photo (frontend serves /channel_photos/<id>.jpg).
+    # Fire-and-forget: never blocks or fails the backfill, silent if Telegram
+    # auth is busy. scripts/download_channel_photos.py covers history.
+    try:
+        _spawn_photo_fetch(channel_id, channel_ref)
+    except Exception:
+        log.debug("photo fetch kickoff skipped for channel %s", channel_id)
 
     # 2. PARSE (both chains) → deduplicate → persist ------------------------
     # One fetch, two parsers over the SAME message list: Solana base58 mints
