@@ -40,7 +40,9 @@ class Progress:
     found: int = 0
     priced: int = 0
     unpriceable: int = 0
-    immature: int = 0
+    immature: int = 0    # legacy engine only (7d defers nothing)
+    live: int = 0        # 7d: provisional verdicts inside the open window
+    waiting: int = 0     # 7d: market data not indexed yet, retry next pass
     total_calls: int = 0
     message: str = ""
 
@@ -230,6 +232,90 @@ def mature_pending_calls(progress_cb: ProgressCb = _noop) -> int:
         progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows), priced=priced))
     log.info("startup maturation: priced %d previously immature call(s)", priced)
     return priced
+
+
+def rescore_live_calls(progress_cb: ProgressCb = _noop,
+                       limit: Optional[int] = None) -> int:
+    """Re-score every 'live' 7d call through the SAME engine with the
+    evaluation window extended toward `now` (and pick up 'waiting_for_data'
+    rows whose market data may exist by now).
+
+    Called on app startup (next to mature_pending_calls) AND at the end of
+    every run_backfill/refresh pass, so a call's provisional verdict tracks
+    the newest candle every time the user refreshes. No per-day cap: cost is
+    bounded by construction — closed candles come from price_cache, and a
+    fresh hourly fetch happens only while the call's window is still open.
+    Rows whose 7d window has now elapsed get their FINAL verdict here and
+    leave the live set forever (spec outcomes for those are identical to the
+    frozen 1-request screening + deep-dive path).
+
+    Returns the number of calls updated.
+    """
+    if settings.pricing_engine != "7d" or not _calls_has_chain_column():
+        return 0  # legacy engine: immature rows go through mature_pending_calls
+    init_db()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    conn = get_connection()
+    # Backlog migration: rows deferred as 'immature_window' under the older
+    # semantics are exactly what 'live' means now — a young call whose 7d
+    # window is still open. Fold them into the live set (one-time, cheap).
+    conn.execute(
+        "UPDATE calls SET score_state='live' "
+        "WHERE status='pending' AND pending_reason='immature_window'"
+    )
+    rows = conn.execute(
+        "SELECT id, token_address, call_timestamp, chain FROM calls "
+        "WHERE score_state = 'live' AND status = 'pending' "
+        "ORDER BY call_timestamp ASC"
+    ).fetchall()
+    rows += conn.execute(
+        "SELECT id, token_address, call_timestamp, chain FROM calls "
+        "WHERE score_state = 'live' AND status IN ('win','loss') "
+        "AND evaluation_end_timestamp > ? "
+        "ORDER BY call_timestamp ASC",
+        (_iso(now),),
+    ).fetchall()
+    if limit:
+        rows = rows[:limit]
+    if not rows:
+        return 0
+
+    client = GeckoTerminalClient()
+    updated = 0
+    for i, row in enumerate(rows, start=1):
+        call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
+        live_now = now if now < call_ts + timedelta(days=settings.eval_days) else None
+        chain = row["chain"] or "sol"
+        try:
+            result, sl_result, r7 = price_one_call(
+                chain, client, row["token_address"], call_ts, now=live_now)
+        except Exception as e:
+            log.exception("rescore failed for call %s", row["id"])
+            if live_now is not None:
+                continue  # transient error — retry next pass
+            from pricing.backtest import _unpriceable_pair
+            result, sl_result = _unpriceable_pair(str(e))
+            r7 = None
+        if r7 is None:
+            continue  # engine switched to legacy mid-run; leave row alone
+        state = score_state_7d(r7)
+        if state == "waiting" and live_now is not None:
+            mark_waiting_7d(row["id"])  # still no data; keep retrying
+        elif state == "waiting":
+            # window closed while we waited — finalize the spec's
+            # unpriceable_loss verdict now that "no data after 7d" is a fact.
+            apply_eval7d(row["id"], r7)
+            persist_stoploss_result(row["id"], sl_result)
+        else:
+            apply_eval7d(row["id"], r7)
+            persist_stoploss_result(row["id"], sl_result)
+        updated += 1
+        progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows),
+                             priced=updated, message=(
+                                 f"rescoring live calls {i}/{len(rows)}"
+                                 + (" (finalizing)" if live_now is None else ""))))
+    log.info("live rescore: updated %d call(s)", updated)
+    return updated
 
 
 def ensure_channel(
@@ -490,6 +576,7 @@ def apply_eval7d(call_id: int, r) -> None:
                 granular_analysis_required = ?,
                 option2_entry = ?,
                 evaluation_end_timestamp = ?,
+                score_state = ?,
                 note = ?
             WHERE id = ?
             """,
@@ -511,14 +598,54 @@ def apply_eval7d(call_id: int, r) -> None:
                 1 if r.granular_analysis_required else 0,
                 1 if r.option2_entry else 0,
                 _iso(r.evaluation_end_timestamp) if r.evaluation_end_timestamp else None,
+                score_state_7d(r),
                 r.note,
                 call_id,
             ),
         )
 
 
-def price_one_call(chain: str, client, token_address: str, call_ts):
+def score_state_7d(r) -> str:
+    """Classify an Eval7dResult produced with `now` inside the 7d window.
+
+    'final'   — window elapsed (or spec-unpriceable after day 7); never
+                revisited.
+    'waiting' — window open and the verdict is an unpriceable caused by
+                MISSING market data (pool not indexed yet / candles not
+                stored). For a young call that's not a real 'unpriceable'
+                per the spec's intent — the token may list/publish hours
+                later — so the row stays pending and is retried every pass.
+    'live'    — window open with a PROVISIONAL verdict (win/loss on the
+                observed slice). Re-scored on every pass until 'final'.
+    """
+    if getattr(r, "window_complete", True):
+        return "final"
+    if r.status_plain == "unpriceable_loss":
+        note = r.note or ""
+        if note in ("no pool", "no call-hour candle", "no call-minute candle") \
+                or "fetch failed" in note:
+            return "waiting"
+    return "live"
+
+
+def mark_waiting_7d(call_id: int) -> None:
+    """Row's 7d window is open and market data isn't there yet: keep it
+    pending, tag it so run_backfill + rescore_live_calls retry it each pass."""
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE calls SET engine='7d', score_state='live', "
+            "pending_reason='waiting_for_data' WHERE id = ?",
+            (call_id,),
+        )
+
+
+def price_one_call(chain: str, client, token_address: str, call_ts,
+                   now: Optional[datetime] = None):
     """Score one call under the configured engine.
+
+    `now` (7d engine only): LIVE mode truncates the evaluation window at
+    `now`, producing a PROVISIONAL verdict for calls younger than
+    eval_days — see pricing/strategy7d.py. None = full frozen-spec window.
 
     -> (BacktestResult, StoplossResult, Eval7dResult|None). A None third
     element means the legacy engine produced the pair; non-7d callers can
@@ -569,6 +696,7 @@ def price_one_call(chain: str, client, token_address: str, call_ts):
         token_address, call_ts, fetch_hourly, fetch_minute,
         eval_days=settings.eval_days,
         entry_grace_minutes=settings.entry_grace_minutes,
+        now=now,
     )
     result, sl = eval7d_to_legacy_pair(r)
     return result, sl, r
@@ -743,6 +871,8 @@ def run_backfill(
     unpriceable = 0
     priced_rh = 0
     unpriceable_rh = 0
+    live = 0
+    waiting = 0
     for i, row in enumerate(pending, start=1):
         addr = row["token_address"]
         sym = ""  # we don't have it in the pending row; use the address prefix
@@ -751,18 +881,15 @@ def run_backfill(
             i, len(pending), addr[:12] + "…" + addr[-4:],
         )
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
-        # Immature-window guard: a call whose evaluation window hasn't elapsed
-        # yet can't be scored fairly (12h under legacy, eval_days*24 under 7d).
-        # Mark it and let startup maturation price it later — never lock in a
-        # premature loss.
-        if now_utc < call_ts + timedelta(hours=maturity_hours()):
+        end7 = call_ts + timedelta(days=settings.eval_days)
+        engine7d = settings.pricing_engine == "7d"
+        if not engine7d and now_utc < call_ts + timedelta(hours=maturity_hours()):
+            # Legacy engine (12h horizon) keeps the old defer path.
             with transaction() as conn:
                 conn.execute(
                     "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
                     (row["id"],),
                 )
-            log.info("call %s immature (<%dh old) — deferred to startup maturation",
-                     row["id"], int(maturity_hours()))
             progress.immature += 1
             progress.scanned = i
             progress.message = (
@@ -771,6 +898,10 @@ def run_backfill(
             )
             progress_cb(progress)
             continue
+        # 7d engine: score EVERY call, young ones included. `now` inside the
+        # window truncates it -> PROVISIONAL verdict (score_state='live'),
+        # refreshed toward final by rescore_live_calls on every run/launch.
+        live_now = now_utc if (engine7d and now_utc < end7) else None
         chain = row["chain"] if has_chain else "sol"
         r7 = None
         try:
@@ -778,7 +909,8 @@ def run_backfill(
                 from pricing.backtest import backtest_call_birdeye
                 result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts)
             else:
-                result, sl_result, r7 = price_one_call(chain, client, addr, call_ts)
+                result, sl_result, r7 = price_one_call(chain, client, addr, call_ts,
+                                                       now=live_now)
                 # Birdeye fallback: if GeckoTerminal couldn't price this token
                 # (no pool / no candles), try Birdeye which doesn't need pool
                 # resolution — it takes the token address directly.
@@ -810,15 +942,40 @@ def run_backfill(
                     )
         except Exception as e:
             log.exception("backtest failed for call %s", row["id"])
-            # Treat unexpected errors as unpriceable losses (don't block the run).
+            # Live (window open) call with a transient error -> retry next
+            # pass, never lock in a loss on a glitch. Frozen/legacy window:
+            # treat unexpected errors as unpriceable losses (don't block run).
+            if live_now is not None:
+                mark_waiting_7d(row["id"])
+                waiting += 1
+                progress.waiting = waiting
+                progress.scanned = i
+                progress.message = f"[{i}/{len(pending)}] data fetch error — will retry"
+                progress_cb(progress)
+                continue
             from pricing.backtest import _unpriceable_pair
             result, sl_result = _unpriceable_pair(str(e))
             r7 = None
+        if r7 is not None and score_state_7d(r7) == "waiting":
+            # Young call, market data not indexed yet (no pool / no candles):
+            # stay pending with a retry tag instead of finalizing unpriceable.
+            mark_waiting_7d(row["id"])
+            waiting += 1
+            progress.waiting = waiting
+            progress.scanned = i
+            progress.message = (
+                f"[{i}/{len(pending)}] market data not indexed yet — "
+                f"will retry on next refresh"
+            )
+            progress_cb(progress)
+            continue
         if r7 is not None:
             apply_eval7d(row["id"], r7)
         else:
             apply_backtest(channel_id, row["id"], row["message_id"], result)
         persist_stoploss_result(row["id"], sl_result)
+        if r7 is not None and not r7.window_complete:
+            live += 1  # provisional verdict; will be rescored toward final
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
@@ -839,11 +996,21 @@ def run_backfill(
                 priced_rh += 1
         progress.priced = priced
         progress.unpriceable = unpriceable
+        progress.live = live
+        progress.waiting = waiting
         progress.scanned = i
+        tail = []
+        if live:
+            tail.append(f"{live} live")
+        if waiting:
+            tail.append(f"{waiting} waiting for data")
+        if unpriceable:
+            tail.append(f"{unpriceable} not found")
+        if progress.immature:
+            tail.append(f"{progress.immature} deferred")
         progress.message = (
-            f"pricing call {i}/{len(pending)} — "
-            f"{priced} priced, {unpriceable} not found"
-            + (f", {progress.immature} deferred" if progress.immature else "")
+            f"pricing call {i}/{len(pending)} — {priced} scored"
+            + (f" ({'; '.join(tail)})" if tail else "")
         )
         progress_cb(progress)
 
@@ -901,9 +1068,17 @@ def run_backfill(
             )
 
     progress.stage = "done"
+    tail = []
+    if unpriceable:
+        tail.append(f"{unpriceable} not found")
+    if live:
+        tail.append(f"{live} live (refresh to update)")
+    if waiting:
+        tail.append(f"{waiting} waiting for data")
+    if progress.immature:
+        tail.append(f"{progress.immature} deferred")
     progress.message = (
-        f"done — {priced} priced, {unpriceable} not found"
-        + (f", {progress.immature} awaiting 7d window" if progress.immature else "")
+        f"done — {priced} scored" + (f" ({'; '.join(tail)})" if tail else "")
         if pending else "done — no new calls"
     )
     progress_cb(progress)
@@ -961,21 +1136,33 @@ def reprice_calls(
         addr = row["token_address"]
         chain = row["chain"] if has_chain else "sol"
         call_ts = datetime.fromisoformat(row["call_timestamp"].replace("Z", ""))
-        # Immature-window guard (same as backfill): defer, don't score early.
-        if now_utc_reprice < call_ts + timedelta(hours=maturity_hours()):
+        # Legacy engine defers immature calls; the 7d engine scores them LIVE
+        # (provisional verdict, refreshed by rescore_live_calls).
+        engine7d = settings.pricing_engine == "7d"
+        if not engine7d and now_utc_reprice < call_ts + timedelta(hours=maturity_hours()):
             with transaction() as conn:
                 conn.execute(
                     "UPDATE calls SET status='pending', pending_reason='immature_window' WHERE id=?",
                     (row["id"],),
                 )
             continue
+        live_now = (now_utc_reprice
+                    if engine7d and now_utc_reprice < call_ts + timedelta(days=settings.eval_days)
+                    else None)
         try:
-            result, sl_result, r7 = price_one_call(chain, client, addr, call_ts)
+            result, sl_result, r7 = price_one_call(chain, client, addr, call_ts,
+                                                   now=live_now)
         except Exception as e:
             log.exception("reprice backtest failed for call %s", row["id"])
+            if live_now is not None:
+                mark_waiting_7d(row["id"])
+                continue  # transient error on a live call — retry later
             from pricing.backtest import _unpriceable_pair
             result, sl_result = _unpriceable_pair(str(e))
             r7 = None
+        if r7 is not None and score_state_7d(r7) == "waiting" and live_now is not None:
+            mark_waiting_7d(row["id"])
+            continue
         if r7 is not None:
             apply_eval7d(row["id"], r7)
         else:

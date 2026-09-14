@@ -553,6 +553,17 @@ def main() -> None:
     except Exception as e:
         log.warning("startup maturation failed: %s", e)
 
+    # 7d engine: refresh every provisional 'live' verdict with the newest
+    # candles (young calls keep moving toward their final verdict on each
+    # launch; rows whose window elapsed get finalized and leave the set).
+    try:
+        from pipeline import rescore_live_calls
+        n_live = rescore_live_calls()
+        if n_live:
+            st.toast(f"🔄 Updated {n_live} live call(s) with new price data")
+    except Exception as e:
+        log.warning("live rescore failed: %s", e)
+
     channel_ref, start_date, run_btn, title_hint = _render_sidebar()
 
     if run_btn and channel_ref and channel_ref.strip() and start_date:

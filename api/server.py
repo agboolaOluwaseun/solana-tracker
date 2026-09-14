@@ -229,7 +229,8 @@ def channel_calls(request):
     since = W.window_since(window)
     conn = get_connection()
     unified = _unified()
-    extra = (", chain, max_multiple, which_threshold_first, api_requests_used,\n"
+    extra = (", chain, score_state, max_multiple, which_threshold_first, "
+             "api_requests_used,\n"
              "               granular_analysis_required, max_drawdown_pct"
              if unified else "")
     q = f"""
@@ -465,6 +466,8 @@ async def fetch_stream(request: Request):
                             'priced': progress.priced,
                             'unpriceable': progress.unpriceable,
                             'immature': progress.immature,
+                            'live': progress.live,
+                            'waiting': progress.waiting,
                             'total_calls': progress.total_calls,
                             'message': progress.message,
                         }),
@@ -510,6 +513,16 @@ async def fetch_stream(request: Request):
                 else:
                     yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
             
+            # Before finishing: refresh every provisional 'live' verdict
+            # across the DB (calls whose 7d window is still open, plus young
+            # rows that were deferred before live scoring existed). Cheap by
+            # design: closed candles come from price_cache.
+            from pipeline import rescore_live_calls
+            yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
+            loop2 = asyncio.get_event_loop()
+            n_live = await loop2.run_in_executor(None, rescore_live_calls)
+            yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
+
             # Send completion
             yield f"data: {json.dumps({'status': 'complete'})}\n\n"
         
@@ -580,6 +593,8 @@ async def refresh_stream(request: Request):
                             'priced': progress.priced,
                             'unpriceable': progress.unpriceable,
                             'immature': progress.immature,
+                            'live': progress.live,
+                            'waiting': progress.waiting,
                             'total_calls': progress.total_calls,
                             'message': progress.message,
                         }),
@@ -624,6 +639,16 @@ async def refresh_stream(request: Request):
                 else:
                     yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
             
+            # Before finishing: refresh every provisional 'live' verdict
+            # across the DB (calls whose 7d window is still open, plus young
+            # rows that were deferred before live scoring existed). Cheap by
+            # design: closed candles come from price_cache.
+            from pipeline import rescore_live_calls
+            yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
+            loop2 = asyncio.get_event_loop()
+            n_live = await loop2.run_in_executor(None, rescore_live_calls)
+            yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
+
             # Send completion
             yield f"data: {json.dumps({'status': 'complete'})}\n\n"
         

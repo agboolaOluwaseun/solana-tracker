@@ -30,6 +30,8 @@ export interface FetchTask {
   found: number;
   priced: number;
   unpriceable: number;
+  live: number;
+  waiting: number;
   total_calls: number;
   /** Rolling narration lines — what just happened, real counters only. */
   log: string[];
@@ -73,6 +75,8 @@ export const useFetchStore = create<FetchState>((set) => ({
         found: 0,
         priced: 0,
         unpriceable: 0,
+        live: 0,
+        waiting: 0,
         total_calls: 0,
         log: [],
         lastMessage: "",
@@ -118,6 +122,8 @@ export const useFetchStore = create<FetchState>((set) => ({
           if (typeof data.found === "number") t.found = data.found;
           if (typeof data.priced === "number") t.priced = data.priced;
           if (typeof data.unpriceable === "number") t.unpriceable = data.unpriceable;
+          if (typeof data.live === "number") t.live = data.live;
+          if (typeof data.waiting === "number") t.waiting = data.waiting;
           if (typeof data.total_calls === "number") t.total_calls = data.total_calls;
           if (data.message) t = pushLine(t, data.message);
           break;

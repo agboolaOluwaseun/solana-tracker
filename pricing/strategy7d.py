@@ -72,6 +72,12 @@ class Eval7dResult:
     evaluation_end_timestamp: Optional[datetime] = None
     pool_address: Optional[str] = None
     note: str = ""
+    # LIVE mode (evaluate_call_7d given `now` inside the 7d window):
+    # the walk covered [call, now) only. All statuses are then PROVISIONAL:
+    # a screening 'loss' may still flip to win (and max_multiple grows) in
+    # the days remaining. Frozen-spec outcomes are untouched when
+    # window_complete=True (the default).
+    window_complete: bool = True
 
 
 def resolve_order_in_hour(
@@ -117,20 +123,31 @@ def evaluate_call_7d(
     fetch_minute: Callable[[str, str, datetime, datetime], Tuple[list, int]],
     eval_days: int = 7,
     entry_grace_minutes: int = 5,
+    now: Optional[datetime] = None,    # LIVE mode: truncate the window at `now`
 ) -> Eval7dResult:
     """Run the frozen 7-day evaluation for one call.
 
     fetch_hourly / fetch_minute are injected callables
     (pool, token, start, end) -> (list[PricePoint], requests_used); the caller
     owns caching, rate limiting and the chain network.
+
+    LIVE mode (`now` inside the 7-day window): the evaluation covers
+    [call_ts, now) instead of [call_ts, call_ts+eval_days*24h). Outcomes are
+    the same algorithm on the observed slice, but PROVISIONAL — screening
+    cannot conclude 'definite loss' from an incomplete window, so a screening
+    miss returns provisional_loss instead of final loss, and the minute deep-
+    check still triggers whenever the observed high reaches the target. When
+    `now` >= end7 (or None) the frozen full-window semantics apply unchanged.
     """
     end7 = call_ts + timedelta(days=eval_days)
+    live = now is not None and now < end7
+    window_end = now if (now is not None and live) else end7
 
     def _unpriceable(reqs: int, note: str, **kw) -> Eval7dResult:
         return Eval7dResult(
             status_plain="unpriceable_loss", status_stoploss="unpriceable_loss",
             api_requests_used=reqs, evaluation_end_timestamp=end7,
-            pool_address=pool_address, note=note, **kw,
+            pool_address=pool_address, note=note, window_complete=not live, **kw,
         )
 
     if not pool_address:
@@ -140,9 +157,9 @@ def evaluate_call_7d(
     hour_end = hour_start + timedelta(hours=1)
     minute_floor = call_ts.replace(second=0, microsecond=0)
 
-    # ---- REQUEST 1: hourly [call_hour_start, end7) ----
+    # ---- REQUEST 1: hourly [call_hour_start, window_end) ----
     try:
-        hourly, reqs = fetch_hourly(pool_address, token_address, hour_start, end7)
+        hourly, reqs = fetch_hourly(pool_address, token_address, hour_start, window_end)
     except Exception as e:  # noqa: BLE001
         return _unpriceable(0, f"hourly fetch failed: {type(e).__name__}")
 
@@ -154,16 +171,19 @@ def evaluate_call_7d(
     screening_entry = call_hour_candle.low
     screening_target = screening_entry * 2.0
     max_hourly_high = max(
-        (c.high for c in hourly if hour_start <= c.timestamp < end7), default=0.0
+        (c.high for c in hourly if hour_start <= c.timestamp < window_end), default=0.0
     )
 
     if max_hourly_high < screening_target:
+        # Final only when the 7d window actually elapsed; live mode cannot
+        # conclude a definite loss from an incomplete window.
         return Eval7dResult(
             status_plain="loss", status_stoploss="loss",
             screening_entry_usd=screening_entry, screening_target_usd=screening_target,
             which_threshold_first="none", api_requests_used=reqs,
             evaluation_end_timestamp=end7, pool_address=pool_address,
-            note="screening LOSS",
+            note="screening LOSS" if not live else "provisional loss (window open)",
+            window_complete=not live,
         )
 
     # ---- REQUEST 2: call-hour remainder minutes ----
@@ -203,7 +223,9 @@ def evaluate_call_7d(
 
     # ---- final chronological path: call-hour minutes + post-hour hourlies ----
     path = [m for m in minutes if m.timestamp >= entry_candle.timestamp]
-    path += [c for c in hourly if c.timestamp >= hour_end and c.timestamp < end7]
+    # window_end (== now in live mode), never end7: a leaky fetcher must not
+    # smuggle candles past the truncation point into a provisional verdict.
+    path += [c for c in hourly if c.timestamp >= hour_end and c.timestamp < window_end]
     path.sort(key=lambda c: c.timestamp)
 
     t2x: Optional[datetime] = None
@@ -266,4 +288,5 @@ def evaluate_call_7d(
         evaluation_end_timestamp=end7,
         pool_address=pool_address,
         note=which_first,
+        window_complete=not live,
     )

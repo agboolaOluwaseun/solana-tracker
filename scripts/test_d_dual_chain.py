@@ -61,11 +61,50 @@ def fake_fetch(channel_ref, window_start, window_end, limit=None, progress_cb=No
     return (msgs, "D-test channel")
 
 
+class _LiveEval:
+    """Provisional (window-open) fake result for the young seeded calls."""
+    def __init__(self, addr):
+        self.status_plain = "loss"
+        self.status_stoploss = "loss"
+        self.window_complete = False
+        self.note = "provisional loss (window open)"
+        self.pool_address = "pool-" + addr[:8]
+        self.entry_price_usd = self.screening_entry_usd = 1.0
+        self.screening_target_usd = self.target_usd = 2.0
+        self.max_price_usd, self.min_price_usd = 1.2, 0.95
+        self.max_multiple, self.max_drawdown_pct = 1.2, 5.0
+        self.target_2x_reached = self.minus_50_reached = False
+        self.time_2x_reached = self.time_minus_50_reached = None
+        self.which_threshold_first = "none"
+        self.api_requests_used = 1
+        self.granular_analysis_required = False
+        self.option2_entry = False
+        from datetime import timedelta as _td
+        self.evaluation_end_timestamp = datetime.utcnow() + _td(days=7)
+
+
+def fake_price_one_call(chain, client, addr, call_ts, now=None):
+    """Zero-network provisional result; exercises the live lane of the loop."""
+    from models import BacktestResult, StoplossResult
+    r = _LiveEval(addr)
+    r.evaluation_end_timestamp = call_ts + __import__("datetime").timedelta(days=7)
+    br = BacktestResult(entry_price_usd=1.0, peak_price_usd=1.2, peak_timestamp=None,
+                        peak_profit_pct=20.0, is_win=False, status="loss",
+                        pool_address=r.pool_address, error=None)
+    sl = StoplossResult(entry_price_usd=1.0, peak_price_usd=1.2, peak_timestamp=None,
+                        peak_profit_pct=20.0, hit_stoploss=False,
+                        stoploss_timestamp=None, is_win=False, status="loss",
+                        pool_address=r.pool_address, error=None)
+    return br, sl, r
+
+
 def main() -> int:
     import ingestion.telethon_fetcher as tf
     tf.fetch_window_sync = fake_fetch
     orig_import = pipeline._import_fetch_window_sync
+    orig_price = pipeline.price_one_call
     pipeline._import_fetch_window_sync = lambda: fake_fetch
+    pipeline.price_one_call = fake_price_one_call  # zero-network live lane
 
     try:
         prog = pipeline.run_backfill(
@@ -77,26 +116,28 @@ def main() -> int:
         )
     finally:
         pipeline._import_fetch_window_sync = orig_import
+        pipeline.price_one_call = orig_price
 
     conn = sqlite3.connect(SCRATCH)
     conn.row_factory = sqlite3.Row
     ch = conn.execute("SELECT id FROM channels WHERE username='dtest_channel'").fetchone()
     assert ch, "channel not created"
     rows = conn.execute(
-        "SELECT chain, token_address, status, pending_reason, message_id "
-        "FROM calls WHERE channel_id=? ORDER BY chain, call_timestamp",
+        "SELECT chain, token_address, status, pending_reason, score_state, "
+        "message_id FROM calls WHERE channel_id=? ORDER BY chain, call_timestamp",
         (ch["id"],),
     ).fetchall()
     by_chain = {}
     for r in rows:
         by_chain.setdefault(r["chain"], []).append(dict(r))
 
-    print(f"progress: found={prog.found} priced={prog.priced} unpriceable={prog.unpriceable}")
+    print(f"progress: found={prog.found} priced={prog.priced} "
+          f"live={prog.live} unpriceable={prog.unpriceable}")
     for chain, rs in sorted(by_chain.items()):
         print(f"  {chain}: {len(rs)} rows")
         for r in rs:
             print(f"    msg{r['message_id']} {r['token_address'][:16]}… "
-                  f"{r['status']}/{r['pending_reason']}")
+                  f"{r['status']}/{r['pending_reason']}/{r['score_state']}")
 
     ok = True
     sol = by_chain.get("sol", [])
@@ -113,11 +154,16 @@ def main() -> int:
     # Duplicate RH call (msg4 same addr) must be deduped away: only 1 rh row.
     if len(rh) != 1:
         print(f"FAIL: expected 1 robinhood row after dedup, got {len(rh)}"); ok = False
-    # All recent calls must be deferred, zero API pricing happened.
-    if prog.priced or prog.unpriceable:
-        print("FAIL: pricing API calls happened (expected all immature)"); ok = False
-    if not all(r["status"] == "pending" for r in sol + rh):
-        print("FAIL: not all rows pending"); ok = False
+    # Live scoring: young calls now get provisional verdicts (fake engine,
+    # zero real API) instead of the old immature deferral.
+    if prog.priced != len(sol) + len(rh) or prog.live != len(sol) + len(rh):
+        print(f"FAIL: expected all {len(sol)+len(rh)} scored live, "
+              f"got priced={prog.priced} live={prog.live}"); ok = False
+    if prog.unpriceable or prog.waiting:
+        print("FAIL: unexpected unpriceable/waiting rows"); ok = False
+    if not all(r["status"] == "loss" and r["score_state"] == "live"
+               for r in sol + rh):
+        print("FAIL: live rows should be provisional loss/live"); ok = False
     # Ingestion runs: one row per chain produced calls.
     runs = conn.execute(
         "SELECT chain, calls_found FROM ingestion_runs WHERE channel_id=?",

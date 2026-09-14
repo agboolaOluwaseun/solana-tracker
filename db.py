@@ -58,3 +58,7 @@ def init_db() -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(calls)").fetchall()}
     if "pending_reason" not in cols:
         conn.execute("ALTER TABLE calls ADD COLUMN pending_reason TEXT")
+    if "score_state" not in cols:
+        # Live rescoring: 'live' = provisional verdict inside the open 7d
+        # window (rescored every pass), 'final' = window elapsed or legacy.
+        conn.execute("ALTER TABLE calls ADD COLUMN score_state TEXT NOT NULL DEFAULT 'final'")

@@ -15,6 +15,8 @@ export interface SseEvent {
   priced?: number;
   unpriceable?: number;
   immature?: number;
+  live?: number;
+  waiting?: number;
   total_calls?: number;
   message?: string;
   channels?: { channel_id: number; title: string }[];

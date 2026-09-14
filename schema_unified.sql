@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS calls (
     is_win            INTEGER NOT NULL DEFAULT 0,
     status            TEXT NOT NULL DEFAULT 'pending',   -- pending|win|loss|unpriceable_loss|excluded
     pending_reason    TEXT,
+    score_state       TEXT NOT NULL DEFAULT 'final',     -- live=provisional (7d window still open), final=closed
     priced_at         TEXT,
     -- legacy extra columns kept 1:1 so existing writers keep working post-cutover
     error                 TEXT,          -- written by pricing/api_wrappers.py persist path
