@@ -85,7 +85,10 @@ class DexScreenerClient:
 
         chain_pairs = [p for p in pairs if p.get("chainId") == chain]
         if not chain_pairs:
-            return None
+            # The queried address may be a POOL (channels that post calls as
+            # dexscreener/geckoterminal links): look the pair up directly.
+            pool_pair = self.resolve_by_pool(token_address, chain)
+            return pool_pair
 
         # Same selection rule GeckoTerminal uses: highest USD liquidity.
         chain_pairs.sort(
@@ -103,6 +106,53 @@ class DexScreenerClient:
             # Use the queried mint (DexScreener may flip base/quote orientation);
             # callers treat this as the token being priced.
             "token_address": token_address,
+            "liquidity_usd": (best.get("liquidity") or {}).get("usd") or 0,
+            "symbol": base.get("symbol"),
+            "name": base.get("name"),
+        }
+
+    def resolve_by_pool(self, pair_address: str, chain: str = "solana") -> Optional[dict]:
+        """Resolve by the PAIR (pool) address itself — the address embedded in
+        dexscreener/geckoterminal links channels like Civilian Degens post.
+
+        Uses the /latest/dex/search endpoint (finds pairs by pool OR token
+        address) and keeps only a chain-matching pair whose pairAddress is
+        the queried one (or whose base token matches, if search returns by
+        token). Returns the same dict shape as resolve_pool, with token_address
+        set to the pair's BASE token (the thing actually priced).
+        """
+        self._pace()
+        try:
+            resp = self.session.get(
+                f"{_BASE}/latest/dex/search", params={"q": pair_address}, timeout=20
+            )
+            if resp.status_code != 200:
+                return None
+            pairs = (resp.json() or {}).get("pairs") or []
+        except (requests.RequestException, ValueError):
+            return None
+
+        want = pair_address.lower()
+        best = None
+        for p in pairs:
+            if p.get("chainId") != chain:
+                continue
+            pa = (p.get("pairAddress") or "").lower()
+            bt = ((p.get("baseToken") or {}).get("address") or "").lower()
+            if pa == want or bt == want:
+                if best is None or (p.get("liquidity") or {}).get("usd", 0) > \
+                        (best.get("liquidity") or {}).get("usd", 0):
+                    best = p
+        if not best:
+            return None
+        base = best.get("baseToken") or {}
+        pool_address = best.get("pairAddress")
+        if not pool_address:
+            return None
+        return {
+            "pool_address": pool_address,
+            "dex_pool_id": pool_address,
+            "token_address": base.get("address") or pair_address,
             "liquidity_usd": (best.get("liquidity") or {}).get("usd") or 0,
             "symbol": base.get("symbol"),
             "name": base.get("name"),

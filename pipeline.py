@@ -886,6 +886,9 @@ def run_backfill(
         fetched, fetched_title = fetched
     else:
         fetched_title = None
+    # Freeze the message-scan total NOW: progress.scanned gets reused by the
+    # pricing loop as a call index, and ingestion_runs must not record that.
+    messages_scanned = progress.scanned
     # Resolve channel id from fetched messages (all share the same source id).
     tg_id = fetched[0].channel_id if fetched else abs(hash(channel_ref)) % (10 ** 12)
     channel_id = ensure_channel(channel_ref, tg_id, title or fetched_title, username, window_start, window_end)
@@ -1183,7 +1186,7 @@ def run_backfill(
                          calls_found, calls_priced, calls_unpriceable, status)
                     VALUES (?, ?, ?, datetime('now'), 'resume', ?, ?, ?, ?, 'completed')
                     """,
-                    (channel_id, chain_name, started_iso, progress.scanned,
+                    (channel_id, chain_name, started_iso, messages_scanned,
                      found_n, priced_n, unp_n),
                 )
         else:
@@ -1197,7 +1200,7 @@ def run_backfill(
                 (
                     channel_id,
                     started_iso,
-                    progress.scanned,
+                    messages_scanned,
                     progress.found,
                     priced,
                     unpriceable,

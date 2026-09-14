@@ -76,6 +76,41 @@ _DEXSCREENER_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# EXCEPTION to URL-stripping (Civilian Degens pattern): channels that post
+# calls AS DEX links. An address inside a curated allowlist of DEX/explorer
+# hosts IS the call. On dexscreener/geckoterminal/dextools/gmgn the path is
+# the POOL; pricing resolves pool addresses through the DexScreener search
+# fallback in price_one_call (pool -> its base token pair), and post-pricing
+# identity dedup merges the pool-URL row with any later mint mention.
+_DEX_URL_RE = re.compile(
+    r"""https?://[^\s"']*(?:
+          dexscreener\.(?:com|io)/solana
+        | geckoterminal\.com/solana/pools
+        | dextools\.io/app/pair/chains/solana
+        | gmgn\.ai/sol/pool
+        | birdeye\.so/token
+        | pump\.fun/
+        | jup\.ag/
+        | solscan\.io/token/
+        | raydium\.io/
+        | coinmarketcap\.com/cryptocurrencies/
+    )[^\s"']*""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _addresses_in_allowed_dex_urls(text: str) -> "list[str]":
+    """Base58 addresses embedded in allowlisted DEX/explorer URLs."""
+    out: List[str] = []
+    for um in _DEX_URL_RE.finditer(text):
+        url = um.group(0)
+        # Drop non-token path segments (solscan tx/account already stripped
+        # upstream; guard again here) and query params like ?chain=solana.
+        for tok in re.split(r"[/?&=:,]", url):
+            if SOLANA_ADDR_RE.fullmatch(tok) and is_valid_solana_address(tok):
+                out.append(tok)
+    return out
+
 # Presale detection: messages announcing presales (pinksale, "presale starts",
 # "presale begins", etc.) should not be counted as calls — the token isn't
 # trading yet, so there's no entry price to score.
@@ -151,6 +186,10 @@ def extract_addresses(text: str) -> List[str]:
     """
     if not text:
         return []
+    # Calls posted AS DEX links (Civilian Degens): pull the address from the
+    # URL first, before the general strip removes it. Chain-anchored pattern,
+    # so /bsc/ /eth/ links on shared hosts can never inject Solana calls.
+    url_addrs = _addresses_in_allowed_dex_urls(text)
     # Strip solscan tx/account URLs and DexScreener pool URLs before extraction
     text = _SOLSCAN_NON_TOKEN_URL_RE.sub(" ", text)
     text = _DEXSCREENER_URL_RE.sub(" ", text)
@@ -166,8 +205,15 @@ def extract_addresses(text: str) -> List[str]:
         re.IGNORECASE,
     )
     wallet_addrs = {m.group(1) for m in wallet_context_re.finditer(text)}
-    
-    return [a for a in candidates if a not in wallet_addrs]
+    candidates = [a for a in candidates if a not in wallet_addrs]
+
+    # In-text addresses win (a mint beats a pool link); URL addresses are the
+    # fallback for link-only posts. Order preserved, deduped.
+    merged: List[str] = []
+    for a in candidates + url_addrs:
+        if a not in merged:
+            merged.append(a)
+    return merged
 
 
 def extract_ticker(text: str) -> Optional[str]:
