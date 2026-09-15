@@ -19,6 +19,12 @@ from models import ParsedCall, RawMessage
 # Base58 (no 0/O/I/l) Solana mint addresses are 32-44 chars.
 SOLANA_ADDR_RE = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
+# URLs — markdown links and bare http(s) links. Addresses inside ALL non-
+# allowlisted URLs (bot deep-links like t.me/RickBurpBot?start=<mint>, x.com,
+# explorers) must never be treated as calls (mirror of the Robinhood parser).
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]*)\)")
+_BARE_URL_RE = re.compile(r"https?://\S+")
+
 # Common ticker patterns: $SYM, SYM/SOL, SYM-USDC. $-prefix is the dominant one.
 TICKER_RE = re.compile(r"\$([A-Za-z][A-Za-z0-9]{1,9})")
 
@@ -190,9 +196,15 @@ def extract_addresses(text: str) -> List[str]:
     # URL first, before the general strip removes it. Chain-anchored pattern,
     # so /bsc/ /eth/ links on shared hosts can never inject Solana calls.
     url_addrs = _addresses_in_allowed_dex_urls(text)
-    # Strip solscan tx/account URLs and DexScreener pool URLs before extraction
+    # Strip ALL remaining URLs (t.me/RickBurpBot?start=<mint> bot-digest
+    # deep-links, solscan tx/account, x.com, and non-allowlist explorers) so
+    # addresses embedded in links are never treated as calls — same rule the
+    # Robinhood parser applies. solscan/dexscreener patterns are subsumed by
+    # this; kept explicit for documentation + the allowlist mined above.
     text = _SOLSCAN_NON_TOKEN_URL_RE.sub(" ", text)
     text = _DEXSCREENER_URL_RE.sub(" ", text)
+    text = _BARE_URL_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(lambda m: m.group(1) or "", text)
     
     # Find all candidate addresses
     raw = SOLANA_ADDR_RE.findall(text)

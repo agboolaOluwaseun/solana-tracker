@@ -106,3 +106,26 @@ def test_parse_message_robinhood_link_not_solana():
                      timestamp=NOW)
     # robinhood-path links must NOT leak into the Solana parser
     assert parse_message(msg) is None
+
+
+# ---- Bot-notification digests: URLs are dead for BOTH chains ---------------
+
+def test_sol_tme_bot_start_deep_link_not_a_call():
+    # Civilian Degens 'GROUPATH' leaderboard bot post: the 'called' token is
+    # ONLY inside t.me/RickBurpBot?start=<mint> links — must yield nothing.
+    text = ("🏆 Civillian Investors Talk 7D #GROUPATH\n"
+            "[**TRIPLET**](https://t.me/RickBurpBot?start=0x33747DC366636AcEF03ca0C809a22A966e91bd1F)"
+            " [**REVENGE**](https://t.me/RickBurpBot?start=bykrhkExmjWco2mFxKGX3XPmPVaZB9JJp9MkRe8pump)")
+    assert extract_addresses(text) == []
+
+
+def test_sol_achievement_unlocked_not_a_call():
+    # 666/RamJ style notification: '@channel made a x2+ call on [Tok](t.me/bot?start=mint)'
+    text = ("**Achievement Unlocked**: **x2!** @x666calls made a **x2+** call on "
+            "[Marco](https://t.me/spydefi_bot?start=DgXjupqUXCMRzyR98WxKPdhxyLC72MdtMJULu4C3pump).")
+    assert extract_addresses(text) == []
+
+
+def test_sol_xcom_link_not_a_call():
+    text = "Head of Engineering at Coinbase reposed Reeve https://x.com/someuser"
+    assert extract_addresses(text) == []

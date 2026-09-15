@@ -760,10 +760,15 @@ def score_state_7d(r) -> str:
 def mark_waiting_7d(call_id: int) -> None:
     """Row's 7d window is open and market data isn't there yet: keep it
     pending, tag it so run_backfill + rescore_live_calls retry it each pass."""
+    # Only PENDING rows get tagged: a row that already has a provisional or
+    # final verdict keeps it even if one pass transiently fails to resolve
+    # (it stays 'live' and gets retried by the next rescore regardless) —
+    # otherwise decided rows accumulate status=win + waiting_for_data.
     with transaction() as conn:
         conn.execute(
             "UPDATE calls SET engine='7d', score_state='live', "
-            "pending_reason='waiting_for_data' WHERE id = ?",
+            "pending_reason='waiting_for_data' "
+            "WHERE id = ? AND status = 'pending'",
             (call_id,),
         )
 
@@ -814,6 +819,15 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
                 "liquidity_usd": resolved.get("liquidity_usd"),
             }
             upsert_token_meta(pool_info, chain=chain)
+            # When the QUERY was itself a pool key (dexscreener/geckoterminal
+            # links carry the 0x+64 composite pair id, not the mint), keep the
+            # mapping resolvable under the queried address too: next passes hit
+            # the token_meta cache instead of re-searching (and post-pricing
+            # identity dedup can then match it against mint-keyed rows).
+            if (resolved.get("token_address")
+                    and resolved["token_address"].lower() != token_address.lower()):
+                upsert_token_meta({**pool_info, "token_address": token_address},
+                                  chain=chain)
         else:
             pool_info = None
 
