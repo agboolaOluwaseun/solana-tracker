@@ -129,3 +129,18 @@ def test_sol_achievement_unlocked_not_a_call():
 def test_sol_xcom_link_not_a_call():
     text = "Head of Engineering at Coinbase reposed Reeve https://x.com/someuser"
     assert extract_addresses(text) == []
+
+
+# ---- Symbol hints: market-cap phrases are amounts, not tickers -------------
+
+def test_rh_symbol_skips_amount_phrases():
+    # The real FLYAI message: ($MAGIC) ... $2B market cap ... $FLYAI ... $300K
+    text = ("The lead AI engineer at Treasure DAO ($MAGIC), which ran to a "
+            "~$2B market cap, has launched $FLYAI. Sitting around a $300K "
+            "market cap. 0x0088CE7905025c4B5ea1d49aB6179B6aaADB3B9C")
+    calls = rh.parse_calls(1, 1, text, NOW)
+    assert calls[0].token_symbol == "FLYAI"    # not '300K', not 'MAGIC'
+
+
+def test_rh_symbol_keeps_digit_prefixed_tickers():
+    assert rh.parse_calls(1, 1, "$1000PEPE big. 0x" + "a"*40, NOW)[0].token_symbol == "1000PEPE"

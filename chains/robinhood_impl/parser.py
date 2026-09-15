@@ -27,6 +27,11 @@ EVM_ADDRESS_RE = re.compile(r"(?<![0-9a-fA-F])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 EVM_POOL_RE = re.compile(r"(?<![0-9a-fA-F])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 # Symbol hints: $TICKER or a bare word adjacent to the address.
 SYMBOL_RE = re.compile(r"\$([A-Za-z0-9_]{1,20})")
+# Market-cap / amount phrases that masquerade as tickers: "$300K", "$2B",
+# "$162K", "$1.2M market cap" — digits or K/B/M/T suffix on a pure number is
+# an amount, never a token symbol.
+_AMOUNT_HINT_RE = re.compile(
+    r"^[\d_.,]+[KMBT]?$", re.IGNORECASE)
 # Market cap hints like "87k", "400k", "1.2m" (loose; used as context only).
 # URLs: markdown links and bare http(s) links.  Addresses inside MOST URLs are
 # NEVER calls — the channel's bot-mirror messages ("Achievement Unlocked",
@@ -88,11 +93,15 @@ class ParsedCall:
 
 
 def _symbol_hint(text: str, addr_start: int) -> Optional[str]:
-    """Best-effort symbol: $TICKER anywhere in the message, else None."""
+    """Best-effort symbol: last genuine $TICKER before the address, else None.
+    Amount phrases ($300K market cap, $2B) are filtered out — they are money
+    figures, not tokens."""
     before = text[:addr_start]
-    m = list(SYMBOL_RE.finditer(before))
-    if m:
-        return m[-1].group(1)
+    for m in reversed(list(SYMBOL_RE.finditer(before))):
+        cand = m.group(1)
+        if _AMOUNT_HINT_RE.match(cand):
+            continue
+        return cand
     return None
 
 
