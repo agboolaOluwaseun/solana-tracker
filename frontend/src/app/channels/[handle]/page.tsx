@@ -160,10 +160,17 @@ export default function ChannelDeepdivePage() {
         ))}
       </div>
 
-      {/* Token Cards Grid */}
+      {/* Token Cards Grid — the whole tile is tinted green/red by outcome */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {sortedCalls.map((call) => (
-          <div key={call.id} className="card p-4">
+          <div
+            key={call.id}
+            className={`rounded-xl border p-4 transition-colors ${
+              call.is_win
+                ? "border-emerald-500/40 bg-emerald-500/[0.08] hover:border-emerald-500/60"
+                : "border-red-500/40 bg-red-500/[0.08] hover:border-red-500/60"
+            }`}
+          >
             <div className="mb-3 flex items-start justify-between">
               <div>
                 <h3 className="font-semibold text-[var(--text-primary)]">
@@ -176,7 +183,10 @@ export default function ChannelDeepdivePage() {
             </div>
             <div className="space-y-1 text-xs text-[var(--text-secondary)]">
               <p>
-                {call.is_win ? "🟢 WIN" : "🔴 LOSS"} ·{" "}
+                <span className={call.is_win ? "font-bold text-emerald-400" : "font-bold text-red-400"}>
+                  {call.is_win ? "WIN" : "LOSS"}
+                </span>
+                {" · "}
                 {call.peak_profit_pct != null ? `${call.peak_profit_pct.toFixed(0)}%` : "—"}
               </p>
               <p className="text-[var(--text-muted)]">{new Date(call.call_timestamp).toLocaleDateString()}</p>

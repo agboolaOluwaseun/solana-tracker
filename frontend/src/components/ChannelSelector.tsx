@@ -109,9 +109,10 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
   const handleFetch = async () => {
     if (selected.size === 0) return;
 
-    // Keep dropdown open during entire fetch process
-    setIsOpen(true);
     setFetching(true);
+    // Close the dropdown immediately — progress streams into the grid cards,
+    // and toasts cover the add/status messages. No manual "Close" needed.
+    setIsOpen(false);
 
     try {
       // First, ensure all selected channels are in the database
