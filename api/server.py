@@ -615,7 +615,11 @@ async def _fetch_stream_inner(channel_ids, days, conn):
 
 # ── /api/refresh-stream ──────────────────────────────────────────────────────
 async def refresh_stream(request: Request):
-    """Stream progress updates for refreshing all channels from their last call to now.
+    """Stream progress updates for refreshing all channels from their SCAN
+    CHECKPOINT (channels.last_scanned_at — the newest point their messages
+    were walked through on a completed run, active and quiet channels alike)
+    to now; falls back to last stored call, then 7 days, only for channels
+    that have never completed a scan.
     POST body: {} (no parameters needed)
     """
     try:
