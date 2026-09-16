@@ -33,6 +33,12 @@ export default function UpdateFeed({ onDismiss }: Props) {
 
   const finished = allDone && !active;
   const latest = feed[feed.length - 1];
+  // Header honesty: every channel is scanned, but the DB-wide live-verdict
+  // rescore (slow on GT's ~5/min bucket) may still be running. Don't say
+  // "Updating channels" when the counter already reads n/n.
+  const channelsDone = total > 0 && updated === total;
+  const rescorePhase =
+    !finished && channelsDone && (latest?.ch === "—" || !latest);
 
   return (
     <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-subtle)] bg-[var(--bg-card)]/95 backdrop-blur-sm">
@@ -55,7 +61,7 @@ export default function UpdateFeed({ onDismiss }: Props) {
           ) : (
             <>
               <RefreshCw className="h-4 w-4 animate-spin text-[var(--accent-teal)]" />
-              Updating channels
+              {rescorePhase ? "Finalizing live verdicts" : "Updating channels"}
             </>
           )}
         </div>
