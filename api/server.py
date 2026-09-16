@@ -585,7 +585,28 @@ async def _fetch_stream_inner(channel_ids, days, conn):
     from pipeline import rescore_live_calls
     yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
     loop2 = asyncio.get_event_loop()
-    n_live = await loop2.run_in_executor(None, rescore_live_calls)
+    # Stream real per-call counters (see refresh_stream note — silence reads
+    # as a hang on GT's ~5/min pace).
+    _rq = asyncio.Queue()
+
+    def _rescore_cb(progress):
+        asyncio.run_coroutine_threadsafe(
+            _rq.put({'status': 'progress', 'stage': 'rescore',
+                     'scanned': progress.scanned,
+                     'total_calls': progress.total_calls,
+                     'priced': progress.priced,
+                     'message': progress.message}),
+            loop2
+        )
+
+    _rt = loop2.run_in_executor(None, rescore_live_calls, _rescore_cb)
+    while not _rt.done():
+        try:
+            _u = await asyncio.wait_for(_rq.get(), timeout=0.5)
+            yield f"data: {json.dumps(_u)}\n\n"
+        except asyncio.TimeoutError:
+            continue
+    n_live = await _rt
     yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
 
     # Send completion
@@ -753,7 +774,30 @@ async def refresh_stream(request: Request):
             from pipeline import rescore_live_calls
             yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
             loop2 = asyncio.get_event_loop()
-            n_live = await loop2.run_in_executor(None, rescore_live_calls)
+            # Stream the rescore's real per-call counters into the feed —
+            # without a callback the footer sat on one silent line for the
+            # whole pass (GT's ~5/min bucket makes ~40 live calls take many
+            # minutes, and users reasonably read silence as a hang).
+            _rq = asyncio.Queue()
+
+            def _rescore_cb(progress):
+                asyncio.run_coroutine_threadsafe(
+                    _rq.put({'status': 'progress', 'stage': 'rescore',
+                             'scanned': progress.scanned,
+                             'total_calls': progress.total_calls,
+                             'priced': progress.priced,
+                             'message': progress.message}),
+                    loop2
+                )
+
+            _rt = loop2.run_in_executor(None, rescore_live_calls, _rescore_cb)
+            while not _rt.done():
+                try:
+                    _u = await asyncio.wait_for(_rq.get(), timeout=0.5)
+                    yield f"data: {json.dumps(_u)}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+            n_live = await _rt
             yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
 
             # Send completion

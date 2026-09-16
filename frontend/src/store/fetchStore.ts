@@ -143,6 +143,16 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
         : `live verdicts refreshed — ${data.updated ?? 0} calls updated`;
     return { ...prev, feed: [...prev.feed, { ch: "—", line }].slice(-MAX_FEED) };
   }
+  // Rescore per-call progress carries no channel_id (it's DB-wide) —
+  // narrate it to the feed so the footer never looks frozen (GT's ~5/min
+  // pace makes this pass legitimately slow).
+  if (data.status === "progress" && data.stage === "rescore") {
+    if (kind !== "refresh") return prev;
+    const line = data.message || "rescoring live calls…";
+    const last = prev.feed[prev.feed.length - 1];
+    if (last && last.ch === "—" && last.line === line) return prev;
+    return { ...prev, feed: [...prev.feed, { ch: "—", line }].slice(-MAX_FEED) };
+  }
   // 'queue' carries the whole channel list (no channel_id) — seed tasks.
   if (data.status === "queue" && data.channels) {
     const merged = data.channels.map(
