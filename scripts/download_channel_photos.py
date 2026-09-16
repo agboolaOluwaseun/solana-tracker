@@ -24,6 +24,17 @@ PHOTO_DIR = ROOT / "frontend" / "public" / "channel_photos"
 async def _download(force: bool) -> int:
     from db import get_connection
     from ingestion.telethon_fetcher import build_client, _resolve_entity
+    # Same session-file rule as every other Telethon user: one client at a
+    # time. Photo fetches are short, so a plain blocking acquire is fine.
+    from ingestion.telegram_guard import TELEGRAM_LOCK
+    TELEGRAM_LOCK.acquire()
+    try:
+        return await _download_locked(force, build_client, _resolve_entity, get_connection)
+    finally:
+        TELEGRAM_LOCK.release()
+
+
+async def _download_locked(force, build_client, _resolve_entity, get_connection) -> int:
 
     PHOTO_DIR.mkdir(parents=True, exist_ok=True)
     conn = get_connection()

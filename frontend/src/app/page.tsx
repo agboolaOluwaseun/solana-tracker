@@ -40,9 +40,11 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
-  const tasks = useFetchStore((s) => s.tasks);
-  const active = useFetchStore((s) => s.active);
-  const kind = useFetchStore((s) => s.kind);
+  // Fetch progress → grid cards; refresh progress → the bottom feed panel.
+  // Both live in fetchStore and run CONCURRENTLY (server arbitrates Telegram).
+  const fetchTasks = useFetchStore((s) => s.fetch.tasks);
+  const refreshActive = useFetchStore((s) => s.refresh.active);
+  const allDone = useFetchStore((s) => s.refresh.allDone);
   const clearFinished = useFetchStore((s) => s.clearFinished);
 
   const activeTab = channelTab || "Hot";
@@ -52,7 +54,7 @@ export default function HomePage() {
       setChannels(rows.map(toCard));
       // Only fetch runs' finished cards get cleared here; refresh-run tasks
       // feed the bottom panel's n/total counter and must survive the reload.
-      if (useFetchStore.getState().kind === "fetch") clearFinished();
+      clearFinished();
     });
 
   const handleRefresh = async () => {
@@ -61,18 +63,16 @@ export default function HomePage() {
       const ran = await runRefreshStream();
       if (ran) {
         setToast({ type: "success", message: "✓ All channels up to date" });
+        setTimeout(() => setToast(null), 5000);
       } else {
         // The boot refresh is mid-flight — the bottom panel already narrates
         // it; claiming a fresh "done" would be a lie.
         setToast({
-          type: "info" as const,
+          type: "info",
           message: "Update already running — watch the panel below",
         });
-        setRefreshing(false);
         setTimeout(() => setToast(null), 4000);
-        return;
       }
-      setTimeout(() => setToast(null), 5000);
     } catch (error) {
       console.error("Refresh failed:", error);
       setToast({
@@ -90,7 +90,9 @@ export default function HomePage() {
   // Boot auto-update: refresh every channel (and rescore live verdicts) as
   // soon as the page mounts, narrating into the bottom feed panel. Safe to
   // fire twice (StrictMode) — runRefreshStream is a no-op while one runs —
-  // and it never blocks rendering: the grid loads in parallel.
+  // and it never blocks rendering: the grid loads in parallel. A dropdown
+  // fetch the user starts meanwhile runs CONCURRENTLY: the server makes the
+  // refresh's Telegram scans yield around it (never the other way).
   useEffect(() => {
     void runRefreshStream().catch(() => {
       /* surfaced via the feed panel's error line + toast on manual retry */
@@ -100,7 +102,6 @@ export default function HomePage() {
 
   // When the refresh stream finishes (boot or manual), pull the fresh stats
   // into the grid — wins/losses that matured during the run appear live.
-  const allDone = useFetchStore((s) => s.allDone);
   useEffect(() => {
     if (allDone) reloadChannels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -137,7 +138,6 @@ export default function HomePage() {
   // the end of the grid — hide its regular card so it never shows twice.
   // Refresh runs do NOT touch the grid: their narration lives in the bottom
   // feed panel, and the real cards stay visible (they reload at stream end).
-  const fetchTasks = kind === "fetch" ? tasks : [];
   const fetchingIds = new Set(fetchTasks.map((f) => f.channel_id));
   const visibleChannels = sortedChannels.filter((c) => !fetchingIds.has(c.channel_id));
 
@@ -184,12 +184,12 @@ export default function HomePage() {
         </button>
         <button
           onClick={handleRefresh}
-          disabled={refreshing || active}
+          disabled={refreshing || refreshActive}
           className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--border-hover)] hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
           title="Refresh all channels with new data since last fetch"
         >
-          <RefreshCw className={`h-4 w-4 ${refreshing || (active && kind === "refresh") ? "animate-spin" : ""}`} />
-          {active && kind === "refresh" ? "Updating…" : refreshing ? "Refreshing..." : "Refresh All"}
+          <RefreshCw className={`h-4 w-4 ${refreshing || refreshActive ? "animate-spin" : ""}`} />
+          {refreshActive ? "Updating…" : refreshing ? "Refreshing..." : "Refresh All"}
         </button>
         <ChannelSelector onFetch={reloadChannels} />
         <TimeFilter value={timeWindow} onChange={setTimeWindow} />

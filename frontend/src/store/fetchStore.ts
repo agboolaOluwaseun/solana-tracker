@@ -7,22 +7,21 @@
  * The old bug this fixes: ChannelSelector kept a LOCAL tasks state keyed by
  * the Telegram channel id (what the dropdown knows), while page.tsx created
  * a second state keyed by the server event's DB primary key — two cards per
- * channel whose progress updated inconsistently. Now there is ONE keyed list;
- * the server's `start` event (DB pk) re-keys a queued card in place.
+ * channel whose progress updated inconsistently. Now there is ONE keyed list
+ * per run kind; the server's `start` event (DB pk) re-keys a queued card in
+ * place.
  *
- * Run kinds:
- *   fetch   — user picks channels in the dropdown (5-month backfill);
- *             progress renders in the grid cards.
+ * Run kinds run CONCURRENTLY (user decision 2026-09-16: "fetch starts
+ * immediately, not waiting at all for anything"):
+ *   fetch   — dropdown picks (5-month backfill); progress → grid cards.
  *   refresh — boot auto-update + "Refresh All" (delta since last call);
- *             progress renders in the bottom "Updating channels" feed.
- *
- * Contention policy (user request, 2026-09-15): if a boot refresh is running
- * and the user starts a dropdown fetch, the refresh is ABORTED AT A CHANNEL
- * BOUNDARY (never mid-channel — a half-priced channel would strand rows in
- * 'running'), the fetch takes over, and the refresh RESTARTS automatically
- * when the fetch finishes. Each run owns its own Telethon client on its own
- * asyncio loop, but two simultaneous Telegram streams share one session file
- * and invite FloodWait/races — one-at-a-time is deliberate.
+ *             progress → bottom "Updating channels" feed.
+ * A user fetch never aborts the refresh and vice versa. Telegram contention
+ * is solved SERVER-side (ingestion/telegram_guard): the refresh's message
+ * scans yield within ~one batch while a user fetch holds the session, then
+ * the server retries the yielded channel after the fetch finishes. Parsing,
+ * pricing and DB work always run fully concurrent (WAL + shared,
+ * thread-safe API rate limiters).
  */
 import { create } from "zustand";
 import type { SseEvent } from "@/lib/sse";
@@ -58,24 +57,25 @@ export interface FetchTask {
   lastMessage: string;
 }
 
-interface FetchState {
+interface RunState {
   tasks: FetchTask[];
-  active: boolean; // a stream is open
-  /** What the current run is: fetch (grid cards) or refresh (bottom feed). */
-  kind: RunKind | null;
-  /** Rolling global narration for the bottom panel (refresh runs only). */
+  active: boolean; // this kind's stream is open
+  /** Rolling global narration (refresh kind: the bottom feed panel). */
   feed: FeedLine[];
   /** Set once a refresh stream ended cleanly — panel says all up to date. */
   allDone: boolean;
-  /** Seed the task list + panel header for a new run (empty items = wait for
-   * the server's 'queue' event). */
-  beginRun: (items: { channel_id: number; title: string }[], kind: RunKind) => void;
+}
+
+interface FetchState {
+  fetch: RunState;
+  refresh: RunState;
+  beginRun: (kind: RunKind, items: { channel_id: number; title: string }[]) => void;
   /** Apply one SSE event payload (queue | start | progress | done | error |
-   * rescore_start | rescore_done | complete). */
-  applyEvent: (data: SseEvent) => void;
-  /** Stream ended (any kind): flips allDone when every refresh task finished. */
-  endRun: () => void;
-  /** Remove done/error cards once the grid has reloaded and shows real cards. */
+   * rescore_start | rescore_done) to the given run kind. */
+  applyEvent: (kind: RunKind, data: SseEvent) => void;
+  endRun: (kind: RunKind) => void;
+  /** Remove done/error FETCH cards once the grid reloads (refresh tasks feed
+   * the panel's n/total counter and must survive reloads). */
   clearFinished: () => void;
   /** Hide the bottom panel / reset refresh state. */
   clearFeed: () => void;
@@ -83,6 +83,10 @@ interface FetchState {
 
 const MAX_LOG = 12;
 const MAX_FEED = 80;
+
+function blankRun(): RunState {
+  return { tasks: [], feed: [], active: false, allDone: false };
+}
 
 function blankTask(it: { channel_id: number; title: string }): FetchTask {
   return {
@@ -108,29 +112,161 @@ function pushLine(t: FetchTask, msg: string): FetchTask {
   return { ...t, log: log.slice(-MAX_LOG), lastMessage: msg };
 }
 
-/* ── stream orchestration (module-scoped; not renderable state) ─────────── */
+/* ── per-kind reducers ─────────────────────────────────────────────────── */
 
-let controller: AbortController | null = null;
-let refreshRunning = false; // guards double-start (mount vs button)
-let resumePending = false; // refresh was yielded to a fetch → restart after
-
-export function streamActive(): boolean {
-  return controller !== null;
+function beginRunFor(prev: RunState, items: { channel_id: number; title: string }[], kind: RunKind): RunState {
+  return {
+    tasks: items.length ? items.map(blankTask) : prev.tasks,
+    feed:
+      kind === "refresh" && items.length
+        ? [
+            {
+              ch: "—",
+              line: `updating ${items.length} channel${items.length === 1 ? "" : "s"}…`,
+            },
+          ]
+        : kind === "refresh"
+          ? prev.feed
+          : [],
+    active: true,
+    allDone: false,
+  };
 }
 
-/** Core: open a stream, dispatch events into the store, always endRun. */
+function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState {
+  // Stream-level rescore narration (refresh runs only).
+  if (data.status === "rescore_start" || data.status === "rescore_done") {
+    if (kind !== "refresh") return prev;
+    const line =
+      data.status === "rescore_start"
+        ? "refreshing live verdicts (calls younger than 7 days)…"
+        : `live verdicts refreshed — ${data.updated ?? 0} calls updated`;
+    return { ...prev, feed: [...prev.feed, { ch: "—", line }].slice(-MAX_FEED) };
+  }
+  // 'queue' carries the whole channel list (no channel_id) — seed tasks.
+  if (data.status === "queue" && data.channels) {
+    const merged = data.channels.map(
+      (f) => prev.tasks.find((t) => t.channel_id === f.channel_id) ?? blankTask(f),
+    );
+    const line = `updating ${merged.length} channel${merged.length === 1 ? "" : "s"}…`;
+    return {
+      tasks: merged,
+      feed:
+        kind === "refresh"
+          ? [...prev.feed, { ch: "—", line }].slice(-MAX_FEED)
+          : prev.feed,
+      active: true,
+      allDone: false,
+    };
+  }
+  if (!data.channel_id) return prev;
+
+  // Re-key: the client initially queues by whatever id it had (could be a
+  // Telegram id for freshly-added channels); the server's events carry the
+  // authoritative DB primary key. Match by position of the first
+  // queued/running task when ids don't line up, then stamp the real id.
+  let idx = prev.tasks.findIndex((t) => t.channel_id === data.channel_id);
+  const tasks = [...prev.tasks];
+  if (idx === -1 && (data.status === "start" || data.status === "progress")) {
+    const firstOpen = tasks.findIndex(
+      (t) => t.status === "queued" || t.status === "running",
+    );
+    if (firstOpen !== -1) {
+      tasks[firstOpen] = { ...tasks[firstOpen], channel_id: data.channel_id! };
+      idx = firstOpen;
+    }
+  }
+  if (idx === -1) return prev;
+
+  let t = { ...tasks[idx] };
+  if (data.title) t.title = data.title;
+
+  // Bottom-panel narration: refresh runs mirror every channel-tagged
+  // progress line (fetch runs stay card-only, as designed).
+  let feed = prev.feed;
+  const pushFeed = (line: string) => {
+    const last = feed[feed.length - 1];
+    if (last && last.ch === t.title && last.line === line) return;
+    feed = [...feed, { ch: t.title, line }].slice(-MAX_FEED);
+  };
+
+  switch (data.status) {
+    case "start":
+      t = pushLine({ ...t, status: "running", stage: "fetch" }, "starting…");
+      if (kind === "refresh") pushFeed("starting…");
+      break;
+    case "progress": {
+      t = { ...t, status: "running" };
+      if (data.stage) t.stage = data.stage;
+      if (typeof data.scanned === "number") t.scanned = data.scanned;
+      if (typeof data.found === "number") t.found = data.found;
+      if (typeof data.priced === "number") t.priced = data.priced;
+      if (typeof data.unpriceable === "number") t.unpriceable = data.unpriceable;
+      if (typeof data.live === "number") t.live = data.live;
+      if (typeof data.waiting === "number") t.waiting = data.waiting;
+      if (typeof data.total_calls === "number") t.total_calls = data.total_calls;
+      if (data.message) {
+        t = pushLine(t, data.message);
+        if (kind === "refresh") pushFeed(data.message);
+      }
+      break;
+    }
+    case "done": {
+      const summary =
+        data.message ||
+        (t.total_calls === 0
+          ? "up to date"
+          : `done — ${t.priced + t.live} priced, ${t.unpriceable} unpriceable${
+              t.waiting ? `, ${t.waiting} waiting` : ""
+            }`);
+      t = pushLine({ ...t, status: "done", stage: "done" }, summary);
+      if (kind === "refresh") pushFeed(summary);
+      break;
+    }
+    case "error":
+      t = pushLine(
+        { ...t, status: "error", stage: "error" },
+        `✗ ${data.message || "failed"}`,
+      );
+      if (kind === "refresh") pushFeed(`✗ ${data.message || "failed"}`);
+      break;
+  }
+  tasks[idx] = t;
+  return { ...prev, tasks, feed };
+}
+
+function endRunFor(prev: RunState, kind: RunKind): RunState {
+  return {
+    ...prev,
+    active: false,
+    allDone:
+      kind === "refresh" &&
+      prev.tasks.length > 0 &&
+      prev.tasks.every((t) => t.status === "done" || t.status === "error"),
+  };
+}
+
+/* ── stream orchestration (module-scoped; not renderable state) ─────────── */
+
+const controllers: Record<RunKind, AbortController | null> = {
+  fetch: null,
+  refresh: null,
+};
+
+/** Open a stream for one kind. Only the SAME kind's previous stream is
+ * aborted (a second dropdown fetch replaces the first); the other kind keeps
+ * running untouched — the server arbitrates Telegram access. */
 async function runStream(
   kind: RunKind,
   path: string,
   body: unknown,
   items: { channel_id: number; title: string }[],
 ): Promise<void> {
-  const s = useFetchStore.getState();
-  controller?.abort(); // one stream at a time
+  controllers[kind]?.abort();
   const myController = new AbortController();
-  controller = myController;
-  if (kind === "refresh") refreshRunning = true;
-  s.beginRun(items, kind);
+  controllers[kind] = myController;
+  const s = useFetchStore.getState();
+  s.beginRun(kind, items);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       method: "POST",
@@ -141,222 +277,87 @@ async function runStream(
     if (!response.ok) throw new Error(`API ${response.status}`);
     await consumeSse(response, (data) => {
       if (data.status === "complete") return;
-      useFetchStore.getState().applyEvent(data);
+      // Refresh's queue event carries the item list the client didn't seed.
+      useFetchStore.getState().applyEvent(kind, data);
     });
   } catch (err) {
-    if (kind === "refresh" && controller === myController) {
-      useFetchStore.setState((s) => ({
-        feed: [
-          ...s.feed,
-          { ch: "—", line: `✗ update failed: ${err instanceof Error ? err.message : "network error"}` },
-        ].slice(-MAX_FEED),
-      }));
+    if (controllers[kind] === myController && err instanceof Error && err.name !== "AbortError") {
+      if (kind === "refresh") {
+        useFetchStore.setState((st) => ({
+          refresh: {
+            ...st.refresh,
+            feed: [
+              ...st.refresh.feed,
+              { ch: "—", line: `✗ update failed: ${err.message}` },
+            ].slice(-MAX_FEED),
+          },
+        }));
+      }
+      throw err;
     }
-    throw err;
+    if (err instanceof Error && err.name !== "AbortError") throw err;
   } finally {
-    const owned = controller === myController; // a newer run hasn't taken over
-    if (owned) controller = null;
-    if (kind === "refresh") refreshRunning = false;
-    if (owned) useFetchStore.getState().endRun();
-    if (!owned) return; // a fetch replaced us mid-flight; it owns the resume
-    if (kind === "fetch" && resumePending) {
-      // The fetch the refresh yielded to is finished — resume the background
-      // update of everything the abort skipped.
-      resumePending = false;
-      setTimeout(() => {
-        void runStream("refresh", "/api/refresh-stream", {}, []);
-      }, 400);
+    if (controllers[kind] === myController) {
+      controllers[kind] = null;
+      useFetchStore.getState().endRun(kind);
     }
   }
 }
 
-/** Boot auto-update + "Refresh All". Returns false if a refresh was already
- * running (the caller must not claim a fresh completion it didn't produce). */
+/** Boot auto-update + "Refresh All". Returns false if a refresh is already
+ * running (the caller must not claim a fresh completion it didn't produce).
+ * A concurrent user fetch does NOT block it — both streams run side by side;
+ * the server makes the refresh's Telegram scans yield around the fetch. */
 export async function runRefreshStream(): Promise<boolean> {
-  if (refreshRunning) return false;
+  if (useFetchStore.getState().refresh.active) return false;
   await runStream("refresh", "/api/refresh-stream", {}, []);
   return true;
 }
 
-/** Dropdown fetch. Yields the background refresh to this run (abort at the
- * channel boundary, auto-restart when done). */
+/** Dropdown fetch — starts IMMEDIATELY, even while a refresh is running. */
 export async function runFetchStream(
   channelIds: number[],
   items: { channel_id: number; title: string }[],
 ): Promise<void> {
-  if (controller) {
-    resumePending = true; // restart refresh after this fetch
-  }
   await runStream("fetch", "/api/fetch-stream", { channel_ids: channelIds }, items);
 }
 
-/** User dismissed the panel mid-refresh: stop the stream, no resume. */
+/** User dismissed the panel mid-refresh: stop ONLY the refresh stream.
+ * We deliberately do NOT null the controller here — the stream's own
+ * finally block (which fires when the abort propagates) still recognizes
+ * itself as the owner and runs endRun, so `active` can never get stuck. */
 export function stopRefresh() {
-  resumePending = false;
-  controller?.abort();
-  controller = null;
+  controllers.refresh?.abort();
 }
 
-export const useFetchStore = create<FetchState>((set, get) => ({
-  tasks: [],
-  active: false,
-  kind: null,
-  feed: [],
-  allDone: false,
+export const useFetchStore = create<FetchState>((set) => ({
+  fetch: blankRun(),
+  refresh: blankRun(),
 
-  beginRun: (items, kind) =>
+  beginRun: (kind, items) =>
     set((state) => ({
-      active: true,
-      kind,
-      allDone: false,
-      // Empty items = wait for the server's 'queue' event. For refresh runs,
-      // clear any finished FETCH cards first so the panel's n/total counter
-      // never renders stale rows for a moment (e.g. on refresh auto-resume
-      // after a fetch yielded the stream).
-      tasks: items.length
-        ? items.map(blankTask)
-        : kind === "refresh"
-          ? []
-          : state.tasks,
-      feed:
-        kind === "refresh" && items.length
-          ? [
-              {
-                ch: "—",
-                line: `updating ${items.length} channel${items.length === 1 ? "" : "s"}…`,
-              },
-            ]
-          : kind === "refresh"
-            ? state.feed
-            : [],
-    })),
+      [kind]: beginRunFor(state[kind], items, kind),
+    }) as Pick<FetchState, RunKind>),
 
-  applyEvent: (data) =>
-    set((state) => {
-      // Stream-level rescore narration (refresh runs only).
-      if (data.status === "rescore_start" || data.status === "rescore_done") {
-        if (state.kind !== "refresh") return state;
-        const line =
-          data.status === "rescore_start"
-            ? "refreshing live verdicts (calls younger than 7 days)…"
-            : `live verdicts refreshed — ${data.updated ?? 0} calls updated`;
-        return { ...state, feed: [...state.feed, { ch: "—", line }].slice(-MAX_FEED) };
-      }
-      // 'queue' carries the whole channel list (no channel_id) — seed tasks.
-      if (data.status === "queue" && data.channels) {
-        const fresh = data.channels.map(blankTask);
-        const merged = fresh.map(
-          (f) => state.tasks.find((t) => t.channel_id === f.channel_id) ?? f,
-        );
-        const line = `updating ${fresh.length} channel${fresh.length === 1 ? "" : "s"}…`;
-        return {
-          ...state,
-          active: true,
-          tasks: merged,
-          allDone: false,
-          feed:
-            state.kind === "refresh"
-              ? [...state.feed, { ch: "—", line }].slice(-MAX_FEED)
-              : state.feed,
-        };
-      }
-      if (!data.channel_id) return state;
+  applyEvent: (kind, data) =>
+    set((state) => ({
+      [kind]: applyEventFor(state[kind], kind, data),
+    }) as Pick<FetchState, RunKind>),
 
-      // Re-key: the client initially queues by whatever id it had (could be a
-      // Telegram id for freshly-added channels); the server's events carry
-      // the authoritative DB primary key. Match by position of the first
-      // queued/running task when ids don't line up, then stamp the real id.
-      let idx = state.tasks.findIndex((t) => t.channel_id === data.channel_id);
-      if (idx === -1 && (data.status === "start" || data.status === "progress")) {
-        const firstOpen = state.tasks.findIndex(
-          (t) => t.status === "queued" || t.status === "running",
-        );
-        if (firstOpen !== -1) {
-          const pre = [...state.tasks];
-          pre[firstOpen] = { ...pre[firstOpen], channel_id: data.channel_id! };
-          state = { ...state, tasks: pre };
-          idx = firstOpen;
-        }
-      }
-      if (idx === -1) return state;
-
-      const tasks = [...state.tasks];
-      let t = { ...tasks[idx] };
-      if (data.title) t.title = data.title;
-
-      // Bottom-panel narration: refresh runs mirror every channel-tagged
-      // progress line (fetch runs stay card-only, as designed).
-      let feed = state.feed;
-      const pushFeed = (line: string) => {
-        const last = feed[feed.length - 1];
-        if (last && last.ch === t.title && last.line === line) return;
-        feed = [...feed, { ch: t.title, line }].slice(-MAX_FEED);
-      };
-
-      switch (data.status) {
-        case "start":
-          t = pushLine({ ...t, status: "running", stage: "fetch" }, "starting…");
-          if (state.kind === "refresh") pushFeed("starting…");
-          break;
-        case "progress": {
-          t = { ...t, status: "running" };
-          if (data.stage) t.stage = data.stage;
-          if (typeof data.scanned === "number") t.scanned = data.scanned;
-          if (typeof data.found === "number") t.found = data.found;
-          if (typeof data.priced === "number") t.priced = data.priced;
-          if (typeof data.unpriceable === "number") t.unpriceable = data.unpriceable;
-          if (typeof data.live === "number") t.live = data.live;
-          if (typeof data.waiting === "number") t.waiting = data.waiting;
-          if (typeof data.total_calls === "number") t.total_calls = data.total_calls;
-          if (data.message) {
-            t = pushLine(t, data.message);
-            if (state.kind === "refresh") pushFeed(data.message);
-          }
-          break;
-        }
-        case "done": {
-          const summary =
-            data.message ||
-            (t.total_calls === 0
-              ? "up to date"
-              : `done — ${t.priced + t.live} priced, ${t.unpriceable} unpriceable${
-                  t.waiting ? `, ${t.waiting} waiting` : ""
-                }`);
-          t = pushLine({ ...t, status: "done", stage: "done" }, summary);
-          if (state.kind === "refresh") pushFeed(summary);
-          break;
-        }
-        case "error":
-          t = pushLine(
-            { ...t, status: "error", stage: "error" },
-            `✗ ${data.message || "failed"}`,
-          );
-          if (state.kind === "refresh") pushFeed(`✗ ${data.message || "failed"}`);
-          break;
-      }
-      tasks[idx] = t;
-      return { tasks, feed };
-    }),
-
-  endRun: () => {
-    const state = get();
-    const allDone =
-      state.kind === "refresh" &&
-      state.tasks.length > 0 &&
-      state.tasks.every((t) => t.status === "done" || t.status === "error");
-    set({ active: false, allDone });
-  },
+  endRun: (kind) =>
+    set((state) => ({
+      [kind]: endRunFor(state[kind], kind),
+    }) as Pick<FetchState, RunKind>),
 
   clearFinished: () =>
     set((state) => ({
-      tasks: state.tasks.filter((t) => t.status !== "done" && t.status !== "error"),
+      fetch: {
+        ...state.fetch,
+        tasks: state.fetch.tasks.filter(
+          (t) => t.status !== "done" && t.status !== "error",
+        ),
+      },
     })),
 
-  clearFeed: () => set({ feed: [], tasks: [], allDone: false, kind: null }),
+  clearFeed: () => set({ refresh: blankRun() }),
 }));
-
-/** True while any task is still queued/running (grid should keep finished
- * cards visible so the sequential flow is readable until the run ends). */
-export function hasOpenTasks(tasks: FetchTask[]): boolean {
-  return tasks.some((t) => t.status === "queued" || t.status === "running");
-}

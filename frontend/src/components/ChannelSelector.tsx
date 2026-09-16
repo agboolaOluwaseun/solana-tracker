@@ -34,7 +34,7 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
   const [status, setStatus] = useState<{ type: "info" | "success" | "error"; message: string } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const streamActive = useFetchStore((s) => s.active);
+  const streamActive = useFetchStore((s) => s.fetch.active);
 
   useEffect(() => {
     loadTelegramChannels();
@@ -171,10 +171,10 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
 
       const done = useFetchStore
         .getState()
-        .tasks.filter((t) => t.status === "done").length;
+        .fetch.tasks.filter((t) => t.status === "done").length;
       const failed = useFetchStore
         .getState()
-        .tasks.filter((t) => t.status === "error").length;
+        .fetch.tasks.filter((t) => t.status === "error").length;
 
       const finalMessage = `✓ Fetched ${done}/${channelIds.length} channel${channelIds.length !== 1 ? "s" : ""} (5-month window)`;
       setStatus({ type: failed > 0 ? "error" : "success", message: finalMessage });

@@ -338,7 +338,7 @@ def live_env(tmp_path, monkeypatch):
     # hash fallback and the seeded call is orphaned.
     from models import RawMessage
 
-    def fake_fetch(ref, ws, we, limit=None, progress_cb=None):
+    def fake_fetch(ref, ws, we, limit=None, progress_cb=None, opportunistic=False):
         if progress_cb:
             progress_cb(1)
         return ([RawMessage(channel_id=555000, message_id=999,

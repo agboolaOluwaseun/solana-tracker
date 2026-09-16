@@ -454,122 +454,142 @@ async def fetch_stream(request: Request):
         
         from datetime import datetime, timedelta, timezone
         from pipeline import run_backfill, Progress
+        from ingestion.telegram_guard import request_telegram_yield
         
         conn = get_connection()
         
         async def event_generator():
-            for channel_id in channel_ids:
-                # Try primary key first, then telegram_channel_id
-                row = conn.execute(
-                    "SELECT id, telegram_channel_id, username, title FROM channels WHERE id = ?",
-                    (channel_id,)
-                ).fetchone()
-            
-                if not row:
-                    row = conn.execute(
-                        "SELECT id, telegram_channel_id, username, title FROM channels WHERE telegram_channel_id = ?",
-                        (channel_id,)
-                    ).fetchone()
-            
-                if not row:
-                    yield f"data: {json.dumps({'channel_id': channel_id, 'status': 'error', 'message': 'Channel not found'})}\n\n"
-                    continue
-            
-                # Send start event
-                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
-            
-                # Calculate window: the STANDARD 5-month anchor (same start
-                # as the historical backfill preset), unless the client sends
-                # an explicit days override.
-                if days:
-                    window_end = datetime.now(timezone.utc).replace(tzinfo=None)
-                    window_start = window_end - timedelta(days=int(days))
-                else:
-                    from pipeline import preset_window
-                    window_start, window_end = preset_window("5m")
-            
-                # Create progress queue
-                progress_queue = asyncio.Queue()
-            
-                def progress_cb(progress: Progress):
-                    # This runs in a sync context, so we need to use asyncio.run_coroutine_threadsafe
-                    asyncio.run_coroutine_threadsafe(
-                        progress_queue.put({
-                            'channel_id': row['id'],
-                            'status': 'progress',
-                            'stage': progress.stage,
-                            'scanned': progress.scanned,
-                            'found': progress.found,
-                            'priced': progress.priced,
-                            'unpriceable': progress.unpriceable,
-                            'immature': progress.immature,
-                            'live': progress.live,
-                            'waiting': progress.waiting,
-                            'total_calls': progress.total_calls,
-                            'message': progress.message,
-                        }),
-                        loop
-                    )
-            
-                # Run backfill in a thread
-                loop = asyncio.get_event_loop()
-            
-                # Telethon ref: @username if public, else the numeric Telegram id
-                # (NOT the DB primary key — that resolves to nothing in Telegram).
-                channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
-            
-                def run_sync():
-                    # Background rescore yields to user-initiated backfills.
-                    from pipeline import pause_rescoring
-                    try:
-                        with pause_rescoring():
-                            result = run_backfill(
-                                channel_ref=channel_ref,
-                                window_start=window_start.replace(tzinfo=None),
-                                window_end=window_end.replace(tzinfo=None),
-                                title=row["title"],
-                                username=row["username"],
-                                progress_cb=progress_cb,
-                            )
-                        return result
-                    except Exception as e:
-                        return e
-                
-                # Start backfill in thread
-                task = loop.run_in_executor(None, run_sync)
-                
-                # Stream progress updates
-                while not task.done():
-                    try:
-                        update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
-                        yield f"data: {json.dumps(update)}\n\n"
-                    except asyncio.TimeoutError:
-                        continue
-                
-                # Get final result
-                result = await task
-                if isinstance(result, Exception):
-                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
-            
-            # Before finishing: refresh every provisional 'live' verdict
-            # across the DB (calls whose 7d window is still open, plus young
-            # rows that were deferred before live scoring existed). Cheap by
-            # design: closed candles come from price_cache.
-            from pipeline import rescore_live_calls
-            yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
-            loop2 = asyncio.get_event_loop()
-            n_live = await loop2.run_in_executor(None, rescore_live_calls)
-            yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
-
-            # Send completion
-            yield f"data: {json.dumps({'status': 'complete'})}\n\n"
+            # A user fetch outranks every opportunistic refresh: set the yield
+            # flag so any concurrent refresh releases the Telegram session
+            # within one message batch and retries after us. Cleared when this
+            # stream ends (including client disconnect — the generator's
+            # finally runs on cancellation).
+            request_telegram_yield(True)
+            try:
+                async for chunk in _fetch_stream_inner(channel_ids, days, conn):
+                    yield chunk
+            finally:
+                request_telegram_yield(False)
         
         return StreamingResponse(event_generator(), media_type="text/event-stream")
     
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+async def _fetch_stream_inner(channel_ids, days, conn):
+    """Body of fetch_stream; split out so the yield-flag set/clear wraps it
+    in one place."""
+    from datetime import datetime, timedelta, timezone
+    from pipeline import run_backfill, Progress
+
+    for channel_id in channel_ids:
+        # Try primary key first, then telegram_channel_id
+        row = conn.execute(
+            "SELECT id, telegram_channel_id, username, title FROM channels WHERE id = ?",
+            (channel_id,)
+        ).fetchone()
+
+        if not row:
+            row = conn.execute(
+                "SELECT id, telegram_channel_id, username, title FROM channels WHERE telegram_channel_id = ?",
+                (channel_id,)
+            ).fetchone()
+
+        if not row:
+            yield f"data: {json.dumps({'channel_id': channel_id, 'status': 'error', 'message': 'Channel not found'})}\n\n"
+            continue
+
+        # Send start event
+        yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
+
+        # Calculate window: the STANDARD 5-month anchor (same start
+        # as the historical backfill preset), unless the client sends
+        # an explicit days override.
+        if days:
+            window_end = datetime.now(timezone.utc).replace(tzinfo=None)
+            window_start = window_end - timedelta(days=int(days))
+        else:
+            from pipeline import preset_window
+            window_start, window_end = preset_window("5m")
+
+        # Create progress queue
+        progress_queue = asyncio.Queue()
+
+        def progress_cb(progress: Progress):
+            # This runs in a sync context, so we need to use asyncio.run_coroutine_threadsafe
+            asyncio.run_coroutine_threadsafe(
+                progress_queue.put({
+                    'channel_id': row['id'],
+                    'status': 'progress',
+                    'stage': progress.stage,
+                    'scanned': progress.scanned,
+                    'found': progress.found,
+                    'priced': progress.priced,
+                    'unpriceable': progress.unpriceable,
+                    'immature': progress.immature,
+                    'live': progress.live,
+                    'waiting': progress.waiting,
+                    'total_calls': progress.total_calls,
+                    'message': progress.message,
+                }),
+                loop
+            )
+
+        # Run backfill in a thread
+        loop = asyncio.get_event_loop()
+
+        # Telethon ref: @username if public, else the numeric Telegram id
+        # (NOT the DB primary key — that resolves to nothing in Telegram).
+        channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
+
+        def run_sync():
+            # Background rescore yields to user-initiated backfills.
+            from pipeline import pause_rescoring
+            try:
+                with pause_rescoring():
+                    result = run_backfill(
+                        channel_ref=channel_ref,
+                        window_start=window_start.replace(tzinfo=None),
+                        window_end=window_end.replace(tzinfo=None),
+                        title=row["title"],
+                        username=row["username"],
+                        progress_cb=progress_cb,
+                    )
+                return result
+            except Exception as e:
+                return e
+
+        # Start backfill in thread
+        task = loop.run_in_executor(None, run_sync)
+
+        # Stream progress updates
+        while not task.done():
+            try:
+                update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                yield f"data: {json.dumps(update)}\n\n"
+            except asyncio.TimeoutError:
+                continue
+
+        # Get final result
+        result = await task
+        if isinstance(result, Exception):
+            yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
+        else:
+            yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
+
+    # Before finishing: refresh every provisional 'live' verdict
+    # across the DB (calls whose 7d window is still open, plus young
+    # rows that were deferred before live scoring existed). Cheap by
+    # design: closed candles come from price_cache.
+    from pipeline import rescore_live_calls
+    yield f"data: {json.dumps({'status': 'rescore_start'})}\n\n"
+    loop2 = asyncio.get_event_loop()
+    n_live = await loop2.run_in_executor(None, rescore_live_calls)
+    yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
+
+    # Send completion
+    yield f"data: {json.dumps({'status': 'complete'})}\n\n"
 
 
 # ── /api/refresh-stream ──────────────────────────────────────────────────────
@@ -596,91 +616,135 @@ async def refresh_stream(request: Request):
         if not channels:
             return JSONResponse({"success": False, "message": "No channels found"}, status_code=400)
         
+        async def _one_channel(row, out, opportunistic=True):
+            """One channel of an opportunistic refresh: emits its SSE events
+            and records the outcome in out[0] (done | error | yielded)."""
+            yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
+
+            # Calculate window: from last call (or channel creation) to now
+            window_end = datetime.now(timezone.utc)
+            if row['last_call_ts']:
+                # Parse the timestamp. Legacy rows stored NAIVE ISO strings
+                # (channel 12/13-era: '2026-08-10T20:12:29' — always UTC),
+                # unified rows store 'Z'-suffixed aware ones. Mixing the
+                # two made (aware - naive) raise TypeError and killed the
+                # whole boot-refresh stream at that channel.
+                ts = datetime.fromisoformat(row['last_call_ts'].replace('Z', '+00:00'))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                window_start = ts
+            else:
+                # No calls yet, use channel creation time or default to 7 days ago
+                window_start = window_end - timedelta(days=7)
+
+            # Skip if window is too small (less than 1 hour)
+            if (window_end - window_start).total_seconds() < 3600:
+                out[0] = 'done'
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': 0, 'message': 'Already up to date'})}\n\n"
+                return
+
+            # Create progress queue
+            progress_queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+
+            def progress_cb(progress: Progress):
+                asyncio.run_coroutine_threadsafe(
+                    progress_queue.put({
+                        'channel_id': row['id'],
+                        'status': 'progress',
+                        'stage': progress.stage,
+                        'scanned': progress.scanned,
+                        'found': progress.found,
+                        'priced': progress.priced,
+                        'unpriceable': progress.unpriceable,
+                        'immature': progress.immature,
+                        'live': progress.live,
+                        'waiting': progress.waiting,
+                        'total_calls': progress.total_calls,
+                        'message': progress.message,
+                    }),
+                    loop
+                )
+
+            # Telethon ref: @username if public, else the numeric Telegram id
+            channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
+
+            def run_sync():
+                # Background rescore yields to user-initiated backfills.
+                from pipeline import pause_rescoring
+                try:
+                    with pause_rescoring():
+                        return run_backfill(
+                            channel_ref=channel_ref,
+                            window_start=window_start.replace(tzinfo=None),
+                            window_end=window_end.replace(tzinfo=None),
+                            title=row["title"],
+                            username=row["username"],
+                            progress_cb=progress_cb,
+                            opportunistic=opportunistic,
+                        )
+                except Exception as e:
+                    return e
+
+            # Start backfill in thread
+            task = loop.run_in_executor(None, run_sync)
+
+            # Stream progress updates
+            while not task.done():
+                try:
+                    update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                    yield f"data: {json.dumps(update)}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+
+            # Get final result
+            result = await task
+
+            if isinstance(result, Exception):
+                out[0] = 'error'
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
+            elif getattr(result, 'stage', '') == 'yielded':
+                # A user fetch took (or wanted) the Telegram session. Keep the
+                # card OPEN (progress, not done) — the retry lane below (or
+                # the next refresh) finishes this channel.
+                out[0] = 'yielded'
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'progress', 'stage': 'yielded', 'message': 'paused — a fetch is using Telegram; will retry right after'})}\n\n"
+            else:
+                out[0] = 'done'
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
+
         async def event_generator():
             # Announce the full queue up front so the UI can render every
             # channel as 'queued' immediately, then flip them to 'running'
             # one-by-one as this loop reaches each (sequential execution).
             yield f"data: {json.dumps({'status': 'queue', 'channels': [{'channel_id': r['id'], 'title': r['title']} for r in channels]})}\n\n"
+            deferred = []
             for row in channels:
-                # Send start event
-                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
-                
-                # Calculate window: from last call (or channel creation) to now
-                window_end = datetime.now(timezone.utc)
-                if row['last_call_ts']:
-                    # Parse the timestamp (it's stored as ISO string)
-                    window_start = datetime.fromisoformat(row['last_call_ts'].replace('Z', '+00:00'))
-                else:
-                    # No calls yet, use channel creation time or default to 7 days ago
-                    window_start = window_end - timedelta(days=7)
-                
-                # Skip if window is too small (less than 1 hour)
-                if (window_end - window_start).total_seconds() < 3600:
-                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': 0, 'message': 'Already up to date'})}\n\n"
-                    continue
-                
-                # Create progress queue
-                progress_queue = asyncio.Queue()
-                
-                def progress_cb(progress: Progress):
-                    asyncio.run_coroutine_threadsafe(
-                        progress_queue.put({
-                            'channel_id': row['id'],
-                            'status': 'progress',
-                            'stage': progress.stage,
-                            'scanned': progress.scanned,
-                            'found': progress.found,
-                            'priced': progress.priced,
-                            'unpriceable': progress.unpriceable,
-                            'immature': progress.immature,
-                            'live': progress.live,
-                            'waiting': progress.waiting,
-                            'total_calls': progress.total_calls,
-                            'message': progress.message,
-                        }),
-                        loop
-                    )
-                
-                loop = asyncio.get_event_loop()
-                
-                # Telethon ref: @username if public, else the numeric Telegram id
-                channel_ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
-                
-                def run_sync():
-                    # Background rescore yields to user-initiated backfills.
-                    from pipeline import pause_rescoring
-                    try:
-                        with pause_rescoring():
-                            result = run_backfill(
-                                channel_ref=channel_ref,
-                                window_start=window_start.replace(tzinfo=None),
-                                window_end=window_end.replace(tzinfo=None),
-                                title=row["title"],
-                                username=row["username"],
-                                progress_cb=progress_cb,
-                            )
-                        return result
-                    except Exception as e:
-                        return e
-                
-                # Start backfill in thread
-                task = loop.run_in_executor(None, run_sync)
-                
-                # Stream progress updates
-                while not task.done():
-                    try:
-                        update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
-                        yield f"data: {json.dumps(update)}\n\n"
-                    except asyncio.TimeoutError:
-                        continue
-                
-                # Get final result
-                result = await task
-                
-                if isinstance(result, Exception):
-                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
+                out = [None]
+                async for chunk in _one_channel(row, out, opportunistic=True):
+                    yield chunk
+                if out[0] == 'yielded':
+                    deferred.append(row)
+
+            # Retry lane: channels that paused for a user fetch get a second
+            # pass once the fetch has released the Telegram session. Their
+            # scans no longer yield, so this blocks only on the session lock
+            # — seconds per window. The refresh waiting for a fetch is fine
+            # (it is the opportunistic job); NEVER the reverse.
+            if deferred:
+                from ingestion.telegram_guard import should_yield_fetch
+                waited = False
+                while should_yield_fetch():
+                    if not waited:
+                        # Keep the feed honest while we stand down.
+                        for row in deferred:
+                            yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'progress', 'message': 'waiting for your fetch to finish…'})}\n\n"
+                        waited = True
+                    await asyncio.sleep(2)
+                for row in deferred:
+                    out2: list = [None]
+                    async for chunk in _one_channel(row, out2, opportunistic=False):
+                        yield chunk
             
             # Before finishing: refresh every provisional 'live' verdict
             # across the DB (calls whose 7d window is still open, plus young

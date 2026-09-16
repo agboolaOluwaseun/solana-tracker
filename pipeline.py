@@ -854,12 +854,17 @@ def run_backfill(
     fetch_limit: Optional[int] = None,
     pricing_source: str = "geckoterminal",
     progress_cb: ProgressCb = _noop,
+    opportunistic: bool = False,
 ) -> Progress:
     """
     Execute the full backfill for one channel/window. Resumable.
 
     channel_ref: the value passed to Telethon (e.g. '@some_channel').
     window_start/window_end: naive UTC datetimes.
+    opportunistic: background refresh runs pass True — their Telegram fetch
+        yields to a user-initiated fetch (see ingestion.telegram_guard). On
+        yield the run returns early with stage='yielded' WITHOUT persisting
+        anything, so the next refresh redoes this window from the same start.
     """
     init_db()
     progress = Progress(stage="fetch")
@@ -887,8 +892,19 @@ def run_backfill(
             window_end,
             limit=fetch_limit,
             progress_cb=on_scan,
+            opportunistic=opportunistic,
         )
     except Exception as e:
+        from ingestion.telegram_guard import TelegramYield
+        if isinstance(e, TelegramYield):
+            # A user fetch took (or wants) the Telegram session. Nothing was
+            # persisted for this channel — bail quietly; the frontend resumes
+            # the refresh after the fetch, which redoes this window.
+            log.info("refresh yielded to user fetch — %s", channel_ref)
+            progress.stage = "yielded"
+            progress.message = "yielded to user fetch — will retry after"
+            progress_cb(progress)
+            return progress
         log.exception("fetch failed for %s", channel_ref)
         progress.stage = "error"
         progress.message = f"fetch failed: {e}"

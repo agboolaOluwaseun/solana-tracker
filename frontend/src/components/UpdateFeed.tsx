@@ -20,11 +20,10 @@ interface Props {
 }
 
 export default function UpdateFeed({ onDismiss }: Props) {
-  const kind = useFetchStore((s) => s.kind);
-  const feed = useFetchStore((s) => s.feed);
-  const tasks = useFetchStore((s) => s.tasks);
-  const active = useFetchStore((s) => s.active);
-  const allDone = useFetchStore((s) => s.allDone);
+  const feed = useFetchStore((s) => s.refresh.feed);
+  const tasks = useFetchStore((s) => s.refresh.tasks);
+  const active = useFetchStore((s) => s.refresh.active);
+  const allDone = useFetchStore((s) => s.refresh.allDone);
 
   const boxRef = useRef<HTMLDivElement>(null);
   const total = tasks.length;
@@ -38,7 +37,7 @@ export default function UpdateFeed({ onDismiss }: Props) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [feed.length]);
 
-  if (kind !== "refresh" || (feed.length === 0 && total === 0)) return null;
+  if ((feed.length === 0 && total === 0) || (!active && !allDone)) return null;
 
   const finished = allDone && !active;
 

@@ -72,7 +72,7 @@ msgs = [
 ]
 
 
-def fake_fetch(channel_ref, window_start, window_end, limit=None, progress_cb=None):
+def fake_fetch(channel_ref, window_start, window_end, limit=None, progress_cb=None, opportunistic=False):
     if progress_cb:
         progress_cb(len(msgs))
     return (msgs, "D-test channel")
