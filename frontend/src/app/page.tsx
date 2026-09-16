@@ -7,10 +7,14 @@ import LoadingCard from "@/components/LoadingCard";
 import ChannelTabs from "@/components/ChannelTabs";
 import TimeFilter from "@/components/TimeFilter";
 import ChannelSelector from "@/components/ChannelSelector";
+import UpdateFeed from "@/components/UpdateFeed";
 import { useUIStore } from "@/store/uiStore";
-import { useFetchStore } from "@/store/fetchStore";
-import { consumeSse } from "@/lib/sse";
-import { api, apiStrategy, ApiChannel, initialsAvatar, API_BASE } from "@/lib/api";
+import {
+  useFetchStore,
+  runRefreshStream,
+  stopRefresh,
+} from "@/store/fetchStore";
+import { api, apiStrategy, ApiChannel, initialsAvatar } from "@/lib/api";
 import { sortChannels } from "@/lib/sortChannels";
 import type { ChannelCardData } from "@/types";
 
@@ -35,12 +39,10 @@ export default function HomePage() {
   const [channels, setChannels] = useState<ChannelCardData[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const tasks = useFetchStore((s) => s.tasks);
   const active = useFetchStore((s) => s.active);
-  const beginRun = useFetchStore((s) => s.beginRun);
-  const applyEvent = useFetchStore((s) => s.applyEvent);
-  const endRun = useFetchStore((s) => s.endRun);
+  const kind = useFetchStore((s) => s.kind);
   const clearFinished = useFetchStore((s) => s.clearFinished);
 
   const activeTab = channelTab || "Hot";
@@ -48,38 +50,28 @@ export default function HomePage() {
   const reloadChannels = () =>
     api.channels(apiStrategy(strategy), timeWindow, chain).then((rows) => {
       setChannels(rows.map(toCard));
-      clearFinished();
+      // Only fetch runs' finished cards get cleared here; refresh-run tasks
+      // feed the bottom panel's n/total counter and must survive the reload.
+      if (useFetchStore.getState().kind === "fetch") clearFinished();
     });
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE}/api/refresh-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!response.ok) throw new Error(`API ${response.status}`);
-
-      let updated = 0;
-      await consumeSse(response, (data) => {
-        if (data.status === "queue") {
-          // Whole list up front → every channel shows a Queued card now;
-          // they flip to Running sequentially as the server reaches them.
-          beginRun(data.channels ?? []);
-        } else if (data.status === "done") {
-          updated++;
-          applyEvent(data);
-        } else if (data.status === "complete") {
-          reloadChannels();
-        } else {
-          applyEvent(data);
-        }
-      });
-      setToast({
-        type: "success",
-        message: `✓ Updated ${updated} channel${updated !== 1 ? "s" : ""} with new data`,
-      });
+      const ran = await runRefreshStream();
+      if (ran) {
+        setToast({ type: "success", message: "✓ All channels up to date" });
+      } else {
+        // The boot refresh is mid-flight — the bottom panel already narrates
+        // it; claiming a fresh "done" would be a lie.
+        setToast({
+          type: "info" as const,
+          message: "Update already running — watch the panel below",
+        });
+        setRefreshing(false);
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
       setTimeout(() => setToast(null), 5000);
     } catch (error) {
       console.error("Refresh failed:", error);
@@ -89,14 +81,30 @@ export default function HomePage() {
       });
       setTimeout(() => setToast(null), 5000);
     } finally {
-      endRun();
-      // Small grace so the "done" cards are readable before the real ones swap in.
-      setTimeout(() => {
-        reloadChannels();
-        setRefreshing(false);
-      }, 1200);
+      // Small grace so the final feed lines are readable before the swap.
+      setTimeout(() => reloadChannels(), 1200);
+      setRefreshing(false);
     }
   };
+
+  // Boot auto-update: refresh every channel (and rescore live verdicts) as
+  // soon as the page mounts, narrating into the bottom feed panel. Safe to
+  // fire twice (StrictMode) — runRefreshStream is a no-op while one runs —
+  // and it never blocks rendering: the grid loads in parallel.
+  useEffect(() => {
+    void runRefreshStream().catch(() => {
+      /* surfaced via the feed panel's error line + toast on manual retry */
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When the refresh stream finishes (boot or manual), pull the fresh stats
+  // into the grid — wins/losses that matured during the run appear live.
+  const allDone = useFetchStore((s) => s.allDone);
+  useEffect(() => {
+    if (allDone) reloadChannels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allDone]);
 
   // Refetch whenever the strategy toggle or timeframe changes.
   useEffect(() => {
@@ -125,9 +133,12 @@ export default function HomePage() {
     : channels;
   const sortedChannels = sortChannels(filtered, activeTab);
 
-  // A channel currently being fetched is represented by its LoadingCard at
+  // A channel currently being FETCHED is represented by its LoadingCard at
   // the end of the grid — hide its regular card so it never shows twice.
-  const fetchingIds = new Set(tasks.map((f) => f.channel_id));
+  // Refresh runs do NOT touch the grid: their narration lives in the bottom
+  // feed panel, and the real cards stay visible (they reload at stream end).
+  const fetchTasks = kind === "fetch" ? tasks : [];
+  const fetchingIds = new Set(fetchTasks.map((f) => f.channel_id));
   const visibleChannels = sortedChannels.filter((c) => !fetchingIds.has(c.channel_id));
 
   return (
@@ -137,6 +148,8 @@ export default function HomePage() {
         <div className={`fixed top-4 right-4 z-50 rounded-lg border p-4 shadow-lg backdrop-blur-sm animate-in slide-in-from-right ${
           toast.type === "error"
             ? "border-red-500/30 bg-red-500/10 text-red-400"
+            : toast.type === "info"
+            ? "border-[var(--accent-teal)]/30 bg-[var(--accent-teal)]/10 text-[var(--accent-teal)]"
             : "border-green-500/30 bg-green-500/10 text-green-400"
         }`}>
           <div className="flex items-center gap-3">
@@ -175,8 +188,8 @@ export default function HomePage() {
           className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--border-hover)] hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
           title="Refresh all channels with new data since last fetch"
         >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          {refreshing ? "Refreshing..." : "Refresh All"}
+          <RefreshCw className={`h-4 w-4 ${refreshing || (active && kind === "refresh") ? "animate-spin" : ""}`} />
+          {active && kind === "refresh" ? "Updating…" : refreshing ? "Refreshing..." : "Refresh All"}
         </button>
         <ChannelSelector onFetch={reloadChannels} />
         <TimeFilter value={timeWindow} onChange={setTimeWindow} />
@@ -190,7 +203,7 @@ export default function HomePage() {
         <p className="py-20 text-center text-[var(--text-muted)]">Loading channels…</p>
       ) : (
         <>
-          {sortedChannels.length === 0 && tasks.length === 0 ? (
+          {sortedChannels.length === 0 && fetchTasks.length === 0 ? (
             <p className="py-20 text-center text-[var(--text-muted)]">
               No channels yet. Run a backfill to populate data.
             </p>
@@ -201,13 +214,22 @@ export default function HomePage() {
               ))}
               {/* Loading cards render at the END of the same grid, so a new
                   channel appears as the last square — never above the rest. */}
-              {tasks.map((t) => (
+              {fetchTasks.map((t) => (
                 <LoadingCard key={`fetching-${t.channel_id}`} task={t} />
               ))}
             </div>
           )}
         </>
       )}
+
+      {/* Bottom "Updating channels" feed — boot auto-refresh + Refresh All */}
+      <UpdateFeed
+        onDismiss={() => {
+          stopRefresh();
+          useFetchStore.getState().clearFeed();
+          reloadChannels();
+        }}
+      />
     </div>
   );
 }

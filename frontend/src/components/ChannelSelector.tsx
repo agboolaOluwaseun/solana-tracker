@@ -3,8 +3,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { ChevronDown, Loader2, Check, Database, Plus, AlertCircle, CheckCircle2, X, Search } from "lucide-react";
 import { API_BASE } from "@/lib/api";
-import { consumeSse } from "@/lib/sse";
-import { useFetchStore } from "@/store/fetchStore";
+import { runFetchStream, useFetchStore } from "@/store/fetchStore";
 
 interface TelegramChannel {
   telegram_id: number;
@@ -35,9 +34,6 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
   const [status, setStatus] = useState<{ type: "info" | "success" | "error"; message: string } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const beginRun = useFetchStore((s) => s.beginRun);
-  const applyEvent = useFetchStore((s) => s.applyEvent);
-  const endRun = useFetchStore((s) => s.endRun);
   const streamActive = useFetchStore((s) => s.active);
 
   useEffect(() => {
@@ -163,36 +159,26 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
 
       // Queue every channel up front → grid shows Queued cards immediately;
       // the server runs them sequentially and flips each to Running/Done.
-      beginRun(
+      // (If a boot/background refresh is running, runFetchStream aborts it at
+      // a channel boundary and restarts it when this fetch finishes.)
+      await runFetchStream(
+        channelIds,
         channelsToFetch.map((c, i) => ({
           channel_id: channelIds[i],
           title: c.title,
         })),
       );
 
-      const response = await fetch(`${API_BASE}/api/fetch-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // No days override: the server uses the standard 5-month window,
-        // same anchor as the historical backfill preset.
-        body: JSON.stringify({ channel_ids: channelIds }),
-      });
-      if (!response.ok) {
-        throw new Error(`API ${response.status}`);
-      }
+      const done = useFetchStore
+        .getState()
+        .tasks.filter((t) => t.status === "done").length;
+      const failed = useFetchStore
+        .getState()
+        .tasks.filter((t) => t.status === "error").length;
 
-      let successCount = 0;
-      let errorCount = 0;
-      await consumeSse(response, (data) => {
-        if (data.status === "complete") return;
-        applyEvent(data);
-        if (data.status === "done") successCount++;
-        else if (data.status === "error") errorCount++;
-      });
-
-      const finalMessage = `✓ Fetched ${successCount}/${channelIds.length} channel${channelIds.length !== 1 ? "s" : ""} (5-month window)`;
-      setStatus({ type: errorCount > 0 ? "error" : "success", message: finalMessage });
-      showToast(errorCount > 0 ? "error" : "success", finalMessage);
+      const finalMessage = `✓ Fetched ${done}/${channelIds.length} channel${channelIds.length !== 1 ? "s" : ""} (5-month window)`;
+      setStatus({ type: failed > 0 ? "error" : "success", message: finalMessage });
+      showToast(failed > 0 ? "error" : "success", finalMessage);
 
       // Refresh the dialog list so new channels show as "in database" next time
       loadTelegramChannels();
@@ -209,10 +195,8 @@ export default function ChannelSelector({ onFetch }: ChannelSelectorProps) {
       const errorMessage = `✗ Failed: ${error instanceof Error ? error.message : "Unknown error"}`;
       setStatus({ type: "error", message: errorMessage });
       showToast("error", errorMessage);
-      endRun();
     } finally {
       setFetching(false);
-      endRun();
     }
   };
 

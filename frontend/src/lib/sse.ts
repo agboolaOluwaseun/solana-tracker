@@ -20,6 +20,7 @@ export interface SseEvent {
   total_calls?: number;
   message?: string;
   channels?: { channel_id: number; title: string }[];
+  updated?: number;
 }
 
 export async function consumeSse(
