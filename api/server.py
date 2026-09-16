@@ -156,9 +156,12 @@ def leaderboard(request):
             continue  # no decided calls yet for this strategy/window
 
         # Best call in window: highest achieved multiple among decided calls.
-        # Unified schema: COALESCE(max_multiple, peak_multiple) so 7d-engine
-        # rows (max_multiple) and legacy rows (peak_multiple) both rank.
-        mult_col = ("COALESCE(max_multiple, peak_multiple)" if _unified()
+        # Unified schema: COALESCE(max_multiple, peak_multiple, 1+pp%) so 7d
+        # rows (max_multiple) and legacy rows (peak_multiple OR only the
+        # percent they carry) both rank — a win with no multiple field used
+        # to drop out of the tier/best-call math entirely (X2 ≠ win rate bug).
+        mult_col = ("COALESCE(max_multiple, peak_multiple, "
+                    "1.0 + peak_profit_pct / 100.0)" if _unified()
                     else "peak_multiple")
         q = f"""
             SELECT token_symbol, {mult_col} AS best_mult FROM calls

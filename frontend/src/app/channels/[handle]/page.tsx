@@ -77,10 +77,23 @@ export default function ChannelDeepdivePage() {
         Back
       </Link>
 
-      {/* Channel Header */}
+      {/* Channel Header — same photo-with-initials-fallback as the grid cards */}
       <div className="card mb-8 flex items-center gap-6 p-6">
-        <div className="flex h-20 w-20 items-center justify-center rounded-full border-2 border-[var(--accent-cyan)] bg-[var(--accent-teal-dim)] text-2xl font-bold text-[var(--accent-teal)]">
-          {(detail.title || "?").slice(0, 2).toUpperCase()}
+        <div className="relative h-20 w-20 flex-shrink-0">
+          <img
+            src={`/channel_photos/${detail.id}.jpg`}
+            alt={detail.title}
+            className="h-20 w-20 rounded-full border-2 border-[var(--accent-cyan)] object-cover"
+            onError={(e) => {
+              const target = e.target as HTMLImageElement;
+              target.style.display = "none";
+              const fb = target.nextElementSibling as HTMLElement | null;
+              if (fb) fb.style.display = "flex";
+            }}
+          />
+          <div className="hidden h-20 w-20 items-center justify-center rounded-full border-2 border-[var(--accent-cyan)] bg-[var(--accent-teal-dim)] text-2xl font-bold text-[var(--accent-teal)]">
+            {(detail.title || "?").slice(0, 2).toUpperCase()}
+          </div>
         </div>
         <div className="flex-1">
           <div className="flex items-center gap-2">
@@ -127,15 +140,50 @@ export default function ChannelDeepdivePage() {
             Success rate by {timeWindow === "1m" ? "week" : timeWindow === "1d" || timeWindow === "7d" ? "day" : "month"}
           </h3>
           <div className="flex flex-wrap gap-3">
-            {buckets.map((b) => (
-              <div key={b.bucket} className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2 text-center">
-                <div className="text-xs text-[var(--text-muted)]">{b.bucket}</div>
-                <div className="text-sm font-bold text-[var(--accent-teal)]">
-                  {b.win_rate != null ? `${b.win_rate.toFixed(0)}%` : "—"}
+            {buckets.map((b) => {
+              // Same shading language as the call tiles: good months green,
+              // bad (<50% win rate) red; no decided calls stays neutral.
+              const good = b.win_rate != null && b.win_rate >= 50;
+              const bad = b.win_rate != null && b.win_rate < 50;
+              const shade =
+                b.win_rate != null
+                  ? // deeper tint the further from 50% (0.06 → 0.18 alpha)
+                    (0.06 + Math.min(Math.abs(b.win_rate - 50), 50) / 50 * 0.12).toFixed(3)
+                  : "0.04";
+              return (
+                <div
+                  key={b.bucket}
+                  className="rounded-lg border px-3 py-2 text-center"
+                  style={{
+                    borderColor: good
+                      ? "rgba(16,185,129,0.45)"
+                      : bad
+                        ? "rgba(239,68,68,0.45)"
+                        : "var(--border-subtle)",
+                    background: good
+                      ? `rgba(16,185,129,${shade})`
+                      : bad
+                        ? `rgba(239,68,68,${shade})`
+                        : "var(--bg-card)",
+                  }}
+                >
+                  <div className="text-xs text-[var(--text-muted)]">{b.bucket}</div>
+                  <div
+                    className="text-sm font-bold"
+                    style={{
+                      color: good
+                        ? "rgb(52,211,153)"
+                        : bad
+                          ? "rgb(248,113,113)"
+                          : "var(--text-muted)",
+                    }}
+                  >
+                    {b.win_rate != null ? `${b.win_rate.toFixed(0)}%` : "—"}
+                  </div>
+                  <div className="text-[10px] text-[var(--text-muted)]">{b.total_calls} calls</div>
                 </div>
-                <div className="text-[10px] text-[var(--text-muted)]">{b.total_calls} calls</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

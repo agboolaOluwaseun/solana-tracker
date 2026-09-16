@@ -4,8 +4,12 @@ Tier semantics (plan v2, Task B4):
   * A decided call lands in the HIGHEST tier its multiple reaches.
     Tiers are cumulative: 100x subset of 50x subset of ... subset of 2x.
   * '<2x' is the complement (decided calls that never reached 2x).
-  * Multiple used per call: COALESCE(max_multiple, peak_multiple) so both
-    7d-engine rows and legacy 12h rows are tierable.
+  * Multiple used per call: COALESCE(max_multiple, peak_multiple,
+    1 + peak_profit_pct/100) so both 7d-engine rows and legacy 12h rows are
+    tierable — legacy rows ported without a multiple column still carry
+    their peak profit PERCENT, which converts to the same multiple scale.
+    (Without that third fallback every legacy call silently counted as <2x,
+    so the X2 bar contradicted the win rate.)
   * 'decided' = plain strategy win/loss (pending/unpriceable excluded).
   * Meter follows the selected timeframe; strategy='stoploss' restricts the
     population to calls the stoploss strategy decided (sr.status win/loss).
@@ -49,14 +53,16 @@ def tier_counts(channel_id: int, window: str, strategy: str = "normal",
     )
     if strategy == "stoploss":
         q = f"""
-            SELECT COALESCE(cal.max_multiple, cal.peak_multiple) AS m,
+            SELECT COALESCE(cal.max_multiple, cal.peak_multiple,
+                            1.0 + cal.peak_profit_pct / 100.0) AS m,
                    sr.is_win AS w
             FROM calls cal {_strategy_join(strategy)}
             WHERE cal.channel_id = ?{chain_sql}
         """
     else:
         q = f"""
-            SELECT COALESCE(cal.max_multiple, cal.peak_multiple) AS m,
+            SELECT COALESCE(cal.max_multiple, cal.peak_multiple,
+                            1.0 + cal.peak_profit_pct / 100.0) AS m,
                    cal.is_win AS w
             FROM calls cal
             WHERE cal.channel_id = ?{chain_sql} {_strategy_join(strategy)}
