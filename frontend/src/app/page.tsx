@@ -45,6 +45,9 @@ export default function HomePage() {
   const fetchTasks = useFetchStore((s) => s.fetch.tasks);
   const refreshActive = useFetchStore((s) => s.refresh.active);
   const allDone = useFetchStore((s) => s.refresh.allDone);
+  const feedVisible = useFetchStore(
+    (s) => s.refresh.active || (s.refresh.allDone && s.refresh.tasks.length > 0),
+  );
   const clearFinished = useFetchStore((s) => s.clearFinished);
 
   const activeTab = channelTab || "Hot";
@@ -142,7 +145,7 @@ export default function HomePage() {
   const visibleChannels = sortedChannels.filter((c) => !fetchingIds.has(c.channel_id));
 
   return (
-    <div>
+    <div className={feedVisible ? "pb-16" : undefined}>
       {/* Toast notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 rounded-lg border p-4 shadow-lg backdrop-blur-sm animate-in slide-in-from-right ${
