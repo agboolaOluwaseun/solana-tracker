@@ -209,8 +209,15 @@ export const useFetchStore = create<FetchState>((set, get) => ({
       active: true,
       kind,
       allDone: false,
-      // Empty items = wait for the server's 'queue' event (keeps the feed).
-      tasks: items.length ? items.map(blankTask) : state.tasks,
+      // Empty items = wait for the server's 'queue' event. For refresh runs,
+      // clear any finished FETCH cards first so the panel's n/total counter
+      // never renders stale rows for a moment (e.g. on refresh auto-resume
+      // after a fetch yielded the stream).
+      tasks: items.length
+        ? items.map(blankTask)
+        : kind === "refresh"
+          ? []
+          : state.tasks,
       feed:
         kind === "refresh" && items.length
           ? [
