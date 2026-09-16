@@ -447,6 +447,26 @@ def _rescore_pass_once(progress_cb: ProgressCb, limit: Optional[int]) -> int:
     return updated
 
 
+def _checkpoint_scanned_at(channel_id: int, window_end: datetime) -> None:
+    """Record that this channel's messages are now scanned through
+    `window_end` (naive UTC). Opportunistic refresh anchors here instead of
+    at MAX(call.timestamp). Guarded: legacy-schema DBs have no such column,
+    and a failed checkpoint must never fail a completed backfill."""
+    try:
+        iso = window_end.replace(microsecond=0).isoformat() + "Z"
+        with transaction() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM pragma_table_info('channels') WHERE name='last_scanned_at'"
+            ).fetchone()
+            if not exists:
+                return
+            conn.execute(
+                "UPDATE channels SET last_scanned_at=? WHERE id=?", (iso, channel_id)
+            )
+    except Exception:
+        log.warning("failed to checkpoint last_scanned_at for channel %s", channel_id)
+
+
 def ensure_channel(
     channel_ref: str,
     telegram_channel_id: int,
@@ -1236,6 +1256,13 @@ def run_backfill(
                     unpriceable,
                 ),
             )
+
+    # Scan checkpoint: the FETCH walked every message up to this run's
+    # window_end, so opportunistic refreshes can anchor here instead of at
+    # MAX(call.timestamp) — which for a quiet channel means re-scanning its
+    # whole silent backlog on every boot. Only reached on the completed path
+    # (error/yield returned earlier), so the checkpoint never over-promises.
+    _checkpoint_scanned_at(channel_id, window_end)
 
     progress.stage = "done"
     tail = []

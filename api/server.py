@@ -624,9 +624,13 @@ async def refresh_stream(request: Request):
         
         conn = get_connection()
         
-        # Get all channels with their latest call timestamp
+        # Scan checkpoint (last_scanned_at) is the primary anchor: the newest
+        # point messages were demonstrably walked through. Falling back to
+        # MAX(call.timestamp) re-scanned a quiet channel's whole silent
+        # backlog on every boot (user report 2026-09-16).
         channels = conn.execute("""
             SELECT c.id, c.telegram_channel_id, c.username, c.title,
+                   c.last_scanned_at,
                    MAX(cal.call_timestamp) as last_call_ts
             FROM channels c
             LEFT JOIN calls cal ON cal.channel_id = c.id
@@ -642,21 +646,28 @@ async def refresh_stream(request: Request):
             and records the outcome in out[0] (done | error | yielded)."""
             yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
 
-            # Calculate window: from last call (or channel creation) to now
+            # Window: from the SCAN CHECKPOINT (last_scanned_at — the newest
+            # point messages were walked through, even if they held no call)
+            # to now. Fall back to the last stored call, then to 7 days —
+            # anchoring only at MAX(call.timestamp) re-scanned a quiet
+            # channel's entire silent backlog on every boot (the 'since 26
+            # Aug' progress bars the user reported 2026-09-16).
             window_end = datetime.now(timezone.utc)
-            if row['last_call_ts']:
-                # Parse the timestamp. Legacy rows stored NAIVE ISO strings
-                # (channel 12/13-era: '2026-08-10T20:12:29' — always UTC),
-                # unified rows store 'Z'-suffixed aware ones. Mixing the
-                # two made (aware - naive) raise TypeError and killed the
-                # whole boot-refresh stream at that channel.
-                ts = datetime.fromisoformat(row['last_call_ts'].replace('Z', '+00:00'))
+            anchor = None
+            for raw in (row['last_scanned_at'], row['last_call_ts']):
+                if not raw:
+                    continue
+                # Legacy rows stored NAIVE ISO strings (channel 12/13-era:
+                # '2026-08-10T20:12:29' — always UTC), unified rows store
+                # 'Z'-suffixed aware ones. Mixing the two made
+                # (aware - naive) raise TypeError and killed the whole
+                # boot-refresh stream at that channel.
+                ts = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                window_start = ts
-            else:
-                # No calls yet, use channel creation time or default to 7 days ago
-                window_start = window_end - timedelta(days=7)
+                anchor = ts if anchor is None else max(anchor, ts)
+                break  # first non-null wins (checkpoint preferred over call)
+            window_start = anchor if anchor else window_end - timedelta(days=7)
 
             # Skip if window is too small (less than 1 hour)
             if (window_end - window_start).total_seconds() < 3600:

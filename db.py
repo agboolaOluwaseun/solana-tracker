@@ -62,3 +62,21 @@ def init_db() -> None:
         # Live rescoring: 'live' = provisional verdict inside the open 7d
         # window (rescored every pass), 'final' = window elapsed or legacy.
         conn.execute("ALTER TABLE calls ADD COLUMN score_state TEXT NOT NULL DEFAULT 'final'")
+    # Scan checkpoint on channels (opportunistic refresh anchor). Seeded in
+    # the same guarded migration: started_at of the latest completed run is
+    # the newest point up to which that run's FETCH phase walked messages
+    # (pricing happens after the scan, so started_at never over-promises
+    # coverage). NULL = never scanned; refresh falls back to the old anchor.
+    ch_cols = {r["name"] for r in conn.execute("PRAGMA table_info(channels)").fetchall()}
+    if "last_scanned_at" not in ch_cols:
+        conn.execute("ALTER TABLE channels ADD COLUMN last_scanned_at TEXT")
+        try:
+            conn.execute("""
+                UPDATE channels SET last_scanned_at = (
+                    SELECT MAX(r.started_at) FROM ingestion_runs r
+                    WHERE r.channel_id = channels.id AND r.status = 'completed'
+                )
+                WHERE last_scanned_at IS NULL
+            """)
+        except sqlite3.OperationalError:
+            pass  # legacy DB without ingestion_runs — fallback anchor applies

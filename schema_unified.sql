@@ -11,7 +11,14 @@ CREATE TABLE IF NOT EXISTS channels (
     title               TEXT,
     window_start        TEXT NOT NULL,
     window_end          TEXT NOT NULL,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Scan checkpoint: UTC ISO ('Z') of the newest message timestamp THIS
+    -- channel's messages were last walked through (regardless of whether a
+    -- call was found). Opportunistic refresh anchors here instead of at
+    -- MAX(call.timestamp) — otherwise a quiet channel re-scans its entire
+    -- silent backlog on every single boot (user report 2026-09-16: loading
+    -- bars 'since 26 Aug' for channels that simply posted no new calls).
+    last_scanned_at     TEXT
 );   -- chain-agnostic: ONE row per Telegram channel (merged; chain lives on calls)
 
 CREATE TABLE IF NOT EXISTS token_meta (

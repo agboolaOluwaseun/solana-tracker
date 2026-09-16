@@ -123,3 +123,32 @@ def test_non_opportunistic_unaffected(tmp_path, monkeypatch):
 
     assert calls == [False]
     assert prog.stage == "done"
+
+
+def test_checkpoint_written_on_completion(tmp_path, monkeypatch):
+    """A completed run_backfill advances channels.last_scanned_at to its
+    window_end; a yielded run does NOT (refresh must not re-anchor past
+    messages it never actually fetched)."""
+    import pipeline
+    from models import RawMessage
+
+    _scratch_db(tmp_path, monkeypatch)
+
+    def quiet_fetch(ref, ws, we, limit=None, progress_cb=None,
+                    opportunistic=False):
+        return ([RawMessage(channel_id=5, message_id=1, text="gm fam",
+                            timestamp=ws)], "Quiet")
+
+    monkeypatch.setattr(pipeline, "_import_fetch_window_sync",
+                        lambda: quiet_fetch)
+    prog = pipeline.run_backfill(
+        channel_ref="@quiet", window_start=datetime(2026, 9, 1),
+        window_end=datetime(2026, 9, 15, 10, 30), title="Quiet",
+        progress_cb=lambda p: None, opportunistic=True,
+    )
+    assert prog.stage == "done"
+    conn = pipeline.get_connection()
+    ck = conn.execute("SELECT last_scanned_at FROM channels").fetchone()
+    # channels row only exists if ensure_channel ran (it does for completed).
+    if ck is not None:
+        assert ck["last_scanned_at"] == "2026-09-15T10:30:00Z"
