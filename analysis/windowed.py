@@ -64,7 +64,7 @@ def _win_col(strategy: str) -> str:
 
 
 def _chain_clause(chain: Optional[str]) -> tuple[str, list]:
-    """SQL fragment restricting a query to one chain ('sol'|'robinhood') or all."""
+    """SQL fragment restricting a query to one chain ('sol'|'robinhood'|'eth'|'bsc'|'base'|'arc') or all."""
     if chain in (None, "all"):
         return "", []
     return " AND cal.chain = ?", [chain]

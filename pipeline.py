@@ -608,20 +608,42 @@ def persist_stoploss_result(call_id: int, sl) -> None:
 
 # ---- Engine dispatcher (Workstream C) --------------------------------------
 
-_DS_CHAIN = {"sol": "solana", "robinhood": "robinhood"}
+_DS_CHAIN = {"sol": "solana", "robinhood": "robinhood", "eth": "ethereum", "bsc": "bsc", "base": "base", "arc": "arc"}
 _v2_clients: dict = {}
 _ds_client = None
 
 
 def _get_v2_client(chain: str):
-    """One GeckoTerminalClientV2 per network (solana | robinhood).
+    """One GeckoTerminalClientV2 per network.
+
+    Maps internal chain names to GeckoTerminal network names:
+    - sol -> solana
+    - robinhood -> robinhood
+    - eth -> ethereum
+    - bsc -> bsc
+    - base -> base
+    - arc -> arc
 
     NOTE: each client carries its own token bucket; GT's real limit is per IP
     across networks. Mixed-chain channels therefore share ~2 buckets — the
     429 circuit breaker absorbs it, and Workstream D/G price chains in
     separate passes anyway."""
     from pricing.geckoterminal_v2 import GeckoTerminalClientV2
-    net = settings.robinhood_network if chain == "robinhood" else settings.solana_network
+
+    # Map internal chain names to GeckoTerminal NETWORK slugs.
+    # NOTE: GT slugs are NOT the DexScreener ones — verified against
+    # /networks: 'eth' (NOT 'ethereum'), 'bsc', 'base', 'arc', 'solana',
+    # 'robinhood'. Wrong slug = 404 on every OHLCV call.
+    chain_to_network = {
+        "sol": "solana",
+        "robinhood": "robinhood",
+        "eth": "eth",
+        "bsc": "bsc",
+        "base": "base",
+        "arc": "arc"
+    }
+    
+    net = chain_to_network.get(chain, chain)  # Default to chain name if not in mapping
     if net not in _v2_clients:
         _v2_clients[net] = GeckoTerminalClientV2(network=net)
     return _v2_clients[net]
@@ -826,6 +848,9 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
     if pool_info is None:
         resolved = _get_ds_client().resolve_pool(token_address, chain=_DS_CHAIN[chain])
         if (resolved is None or not resolved.get("pool_address")) and chain == "sol":
+            # GT smart resolution is the Solana-only legacy fallback — the
+            # client here is pinned to the solana network, and EVM chains get
+            # DS search fallback (resolve_by_pool) inside resolve_pool itself.
             try:
                 resolved = client.resolve_pool_smart(token_address)
             except Exception:  # noqa: BLE001
@@ -951,15 +976,15 @@ def run_backfill(
     except Exception:
         log.debug("photo fetch kickoff skipped for channel %s", channel_id)
 
-    # 2. PARSE (both chains) → deduplicate → persist ------------------------
-    # One fetch, two parsers over the SAME message list: Solana base58 mints
-    # via ingestion.address_parser, Robinhood-chain 0x EVM addresses via the
-    # vendored chains.robinhood_impl.parser. The alphabets are disjoint
-    # (base58 excludes '0'), so the two passes can never collide.
+    # 2. PARSE (all chains) → deduplicate → persist ------------------------
+    # One fetch, multiple parsers over the SAME message list:
+    # - Solana base58 mints via ingestion.address_parser
+    # - EVM addresses (0x) via chains.robinhood_impl.parser, then chain detection
+    # The alphabets are disjoint (base58 excludes '0'), so the two passes can never collide.
     progress.stage = "parse"
     dual_chain = _calls_has_chain_column()
     sol_parsed: list = []
-    rh_parsed: list = []
+    evm_parsed: list = []  # All EVM addresses, chain detection happens next
     for msg in fetched:
         parsed = parse_message(msg)
         if parsed is not None:
@@ -970,34 +995,53 @@ def run_backfill(
             for rh_call in rh_parser.parse_calls(
                 msg.channel_id, msg.message_id, msg.text, msg.timestamp
             ):
-                rh_parsed.append(_RHCall(
-                    channel_id=rh_call.channel_id,
-                    message_id=rh_call.message_id,
-                    raw_text=rh_call.raw_text,
-                    token_address=rh_call.token_address,
-                    token_symbol=rh_call.token_symbol,
-                    token_name=None,
-                    timestamp=rh_call.timestamp,
-                ))
-    raw_count = len(sol_parsed) + len(rh_parsed)
+                evm_parsed.append({
+                    "call": _RHCall(
+                        channel_id=rh_call.channel_id,
+                        message_id=rh_call.message_id,
+                        raw_text=rh_call.raw_text,
+                        token_address=rh_call.token_address,
+                        token_symbol=rh_call.token_symbol,
+                        token_name=None,
+                        timestamp=rh_call.timestamp,
+                    ),
+                    "text": msg.text,  # Keep text for chain detection
+                })
+    raw_count = len(sol_parsed) + len(evm_parsed)
     # Sort chronologically (oldest first) BEFORE dedup so the FIRST call
     # (not the latest update/pump post) is the one we keep. Dedup is
     # per-chain: a token called on both chains is legitimately two rows.
     sol_parsed.sort(key=lambda c: c.timestamp)
     sol_parsed = deduplicate_calls(sol_parsed)
-    rh_parsed.sort(key=lambda c: c.timestamp)
-    rh_parsed = deduplicate_calls(rh_parsed) if rh_parsed else []
-    deduped_count = len(sol_parsed) + len(rh_parsed)
-    for parsed in sol_parsed:
-        week_index = buckets.week_index(parsed.timestamp)
-        if week_index == 0:
-            week_index = max(1, min(settings.window_weeks, week_index or 1))
-        persist_parsed_call(channel_id, parsed, week_index, chain="sol")
-    for parsed in rh_parsed:
-        week_index = buckets.week_index(parsed.timestamp)
-        if week_index == 0:
-            week_index = max(1, min(settings.window_weeks, week_index or 1))
-        persist_parsed_call(channel_id, parsed, week_index, chain="robinhood")
+    evm_parsed.sort(key=lambda c: c["call"].timestamp)
+    # Dedup EVM addresses (same address on same chain = duplicate)
+    seen_evm = set()
+    deduped_evm = []
+    for item in evm_parsed:
+        addr = item["call"].token_address.lower()
+        if addr not in seen_evm:
+            seen_evm.add(addr)
+            deduped_evm.append(item)
+    evm_parsed = deduped_evm
+    deduped_count = len(sol_parsed) + len(evm_parsed)
+    
+    # Detect chains for all EVM addresses
+    from chains.chain_detector import detect_chain
+    chain_groups = {"sol": sol_parsed}  # Solana calls are already grouped
+    for item in evm_parsed:
+        detected_chain = detect_chain(item["text"], item["call"].token_address)
+        if detected_chain not in chain_groups:
+            chain_groups[detected_chain] = []
+        chain_groups[detected_chain].append(item["call"])
+    
+    # Persist all chains
+    for chain_name, calls in chain_groups.items():
+        for parsed in calls:
+            week_index = buckets.week_index(parsed.timestamp)
+            if week_index == 0:
+                week_index = max(1, min(settings.window_weeks, week_index or 1))
+            persist_parsed_call(channel_id, parsed, week_index, chain=chain_name)
+    
     progress.found = deduped_count
     progress.total_calls = deduped_count
     progress.message = (
@@ -1012,9 +1056,11 @@ def run_backfill(
             "dedup: %d raw calls -> %d after window-wide dedup (%d pump-updates removed)",
             raw_count, deduped_count, raw_count - deduped_count,
         )
-    if rh_parsed:
-        log.info("dual-chain: %d solana + %d robinhood calls found",
-                 len(sol_parsed), len(rh_parsed))
+    
+    # Log chain distribution
+    chain_summary = ", ".join(f"{len(calls)} {chain}" for chain, calls in chain_groups.items() if calls)
+    if chain_summary:
+        log.info("multi-chain: %s", chain_summary)
 
     # 2b. Cross-run reconciliation: a previous (shorter) run may have inserted
     #     a later pump-update as "the call"; now that a longer window sees the
@@ -1022,9 +1068,9 @@ def run_backfill(
     #     Partitioned per chain on the unified schema (a sol ticker must never
     #     shadow an EVM ticker with the same symbol).
     if dual_chain:
-        reconcile_channel_duplicates(channel_id, chain="sol")
-        if rh_parsed:
-            reconcile_channel_duplicates(channel_id, chain="robinhood")
+        for chain_name in chain_groups.keys():
+            if chain_groups[chain_name]:  # Only reconcile chains that have calls
+                reconcile_channel_duplicates(channel_id, chain=chain_name)
     else:
         reconcile_channel_duplicates(channel_id)
 
@@ -1059,8 +1105,9 @@ def run_backfill(
     birdeye_client = BirdeyeClient()
     priced = 0
     unpriceable = 0
-    priced_rh = 0
-    unpriceable_rh = 0
+    # Track per-chain pricing stats
+    chain_priced = {}  # chain -> count of priced calls
+    chain_unpriceable = {}  # chain -> count of unpriceable calls
     live = 0
     waiting = 0
     for i, row in enumerate(pending, start=1):
@@ -1169,8 +1216,7 @@ def run_backfill(
 
         if result.status == "unpriceable_loss":
             unpriceable += 1
-            if chain == "robinhood":
-                unpriceable_rh += 1
+            chain_unpriceable[chain] = chain_unpriceable.get(chain, 0) + 1
             # Log unpriceable tokens to the terminal (time + message excerpt)
             # so you can investigate them.
             log.warning(
@@ -1182,8 +1228,7 @@ def run_backfill(
             )
         else:
             priced += 1
-            if chain == "robinhood":
-                priced_rh += 1
+            chain_priced[chain] = chain_priced.get(chain, 0) + 1
         progress.priced = priced
         progress.unpriceable = unpriceable
         progress.live = live
@@ -1216,18 +1261,21 @@ def run_backfill(
 
     # 5. Record run(s) --------------------------------------------------------
     # Unified schema: one ingestion_runs row per chain that produced calls
-    # ('sol' always; 'robinhood' only when RH calls were priced). Legacy
-    # schema has no chain column -> single combined row, as before.
+    # Log ingestion runs per chain. Legacy schema has no chain column -> single combined row.
     conn = get_connection()
     run_has_chain = any(r["name"] == "chain"
                         for r in conn.execute("PRAGMA table_info(ingestion_runs)").fetchall())
     started_iso = _iso(datetime.now(timezone.utc).replace(tzinfo=None))
     with transaction() as conn:
         if run_has_chain:
-            runs = [("sol", len(sol_parsed), priced - priced_rh,
-                     unpriceable - unpriceable_rh)]
-            if rh_parsed:
-                runs.append(("robinhood", len(rh_parsed), priced_rh, unpriceable_rh))
+            # Build per-chain stats from chain_groups
+            runs = []
+            for chain_name, calls in chain_groups.items():
+                if calls:  # Only log chains that have calls
+                    chain_found = len(calls)
+                    chain_priced_count = chain_priced.get(chain_name, 0)
+                    chain_unpriceable_count = chain_unpriceable.get(chain_name, 0)
+                    runs.append((chain_name, chain_found, chain_priced_count, chain_unpriceable_count))
             for chain_name, found_n, priced_n, unp_n in runs:
                 conn.execute(
                     """

@@ -47,6 +47,11 @@ class _RetryableAPIError(GeckoTerminalError):
     """429 / 403 / 5xx — retryable."""
 
 
+# One token bucket for every GeckoTerminalClientV2 instance (per IP, see
+# __init__). Defined before the class so the first client constructs it.
+_SHARED_GT_LIMITER = None
+
+
 class GeckoTerminalClientV2:
     def __init__(self, requests_per_minute: Optional[int] = None, network: Optional[str] = None):
         self.base_url = settings.geckoterminal_base_url
@@ -66,7 +71,17 @@ class GeckoTerminalClientV2:
         # Pacing AT the refill rate (5/min) is the fastest clean sustained pace;
         # anything faster accumulates 429 cooldowns that cost more net time.
         rpm = requests_per_minute or 5
-        self.limiter = RateLimiterV2(rpm, safety_margin=1.0, min_rpm=2)
+        # SHARED-IP discipline: GeckoTerminal's bucket is per IP across ALL
+        # networks — one limiter governs every client instance so six chains
+        # cannot multiply the request rate past the ~5/min refill. Without
+        # the shared limiter each client paced itself at 5 RPM independently
+        # (= 30 combined) and every request after the bucket drained hit 429
+        # cooldowns — which is what made the multi-chain scan crawl.
+        limiter = _SHARED_GT_LIMITER
+        if limiter is None:
+            limiter = RateLimiterV2(rpm, safety_margin=1.0, min_rpm=2)
+            globals()["_SHARED_GT_LIMITER"] = limiter
+        self.limiter = limiter
         self.ohlcv_limiter = self.limiter  # compatibility aliases
         self.search_limiter = self.limiter
         # Request counters for instrumentation

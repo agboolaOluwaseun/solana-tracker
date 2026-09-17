@@ -63,15 +63,15 @@ def _j(rows) -> JSONResponse:
     return JSONResponse(json.loads(json.dumps(rows, default=str)))
 
 
-def _chain(request, default: str = "sol") -> str | None:
-    """?chain=sol|robinhood|all — 'all' returns None (no chain filter).
+def _chain(request, default: str = "all") -> str | None:
+    """?chain=sol|robinhood|eth|bsc|base|arc|all — 'all' returns None (no chain filter).
 
     On the legacy solana_tracker.db there is no chain column (every row is
     Solana), so any requested chain degrades to None — merged stats there
     ARE the per-chain stats. Keeps old API clients unbroken on both DBs.
     """
     v = request.query_params.get("chain", default)
-    if v not in ("sol", "robinhood", "all"):
+    if v not in ("sol", "robinhood", "eth", "bsc", "base", "arc", "all"):
         v = default
     if v == "all" or not _unified():
         return None

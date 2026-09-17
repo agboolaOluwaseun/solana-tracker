@@ -48,6 +48,27 @@ class DexScreenerClient:
             ),
         })
         self._last_call = 0.0
+    
+    def get_pairs_by_token(self, token_address: str) -> list:
+        """Get all pairs for a token address across all chains."""
+        self._pace()
+        try:
+            resp = self.session.get(
+                f"{_BASE}/latest/dex/tokens/{token_address}", timeout=20
+            )
+        except requests.RequestException as e:
+            log.warning("DexScreener request failed for %s: %s", token_address[:10], e)
+            return []
+        
+        if resp.status_code != 200:
+            log.debug("DexScreener HTTP %s for %s", resp.status_code, token_address[:10])
+            return []
+        
+        try:
+            pairs = (resp.json() or {}).get("pairs") or []
+            return pairs
+        except ValueError:
+            return []
 
     def _pace(self) -> None:
         elapsed = time.monotonic() - self._last_call
@@ -58,7 +79,7 @@ class DexScreenerClient:
     def resolve_pool(self, token_address: str, chain: str = "solana") -> Optional[dict]:
         """
         Resolve a token mint to its highest-liquidity pool on `chain`
-        ('solana' | 'robinhood' — DexScreener chainId values).
+        ('solana' | 'robinhood' | 'ethereum' | 'bsc' | 'base' | 'arc' — DexScreener chainId values).
 
         Returns a dict in the same shape GeckoTerminalClient.resolve_pool_smart
         produces: {pool_address, dex_pool_id, token_address, liquidity_usd,

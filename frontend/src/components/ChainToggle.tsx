@@ -4,13 +4,17 @@ import type { Chain } from "@/types";
 import { useUIStore } from "@/store/uiStore";
 
 /**
- * Navbar pill toggle for the chain scope: [SOL | RH | ALL]. Mirrors
- * StrategyToggle's exact styling. Drives every list-page metric via the
+ * Navbar pill toggle for the chain scope: [SOL | RH | ETH | BSC | BASE | ARC | ALL].
+ * Mirrors StrategyToggle's exact styling. Drives every list-page metric via the
  * store; deep-dive pages use `deepDiveChain` instead.
  */
 const OPTIONS: { value: Chain; label: string }[] = [
   { value: "sol", label: "SOL" },
   { value: "robinhood", label: "RH" },
+  { value: "eth", label: "ETH" },
+  { value: "bsc", label: "BSC" },
+  { value: "base", label: "BASE" },
+  { value: "arc", label: "ARC" },
   { value: "all", label: "ALL" },
 ];
 

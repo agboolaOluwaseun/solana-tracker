@@ -30,8 +30,8 @@ export const useUIStore = create<UIState>((set) => ({
   timeWindow: "all",
   channelTab: "Consistent",
   strategy: "100",
-  chain: "sol",
-  deepDiveChain: "sol",
+  chain: "all",
+  deepDiveChain: "all",
   callModal: null,
   searchQuery: "",
 
