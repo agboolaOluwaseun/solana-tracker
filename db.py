@@ -26,7 +26,10 @@ def get_connection() -> sqlite3.Connection:
     conn = _local.__dict__.get("conn")
     if conn is None:
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(settings.db_path, isolation_level=None)  # autocommit
+        conn = sqlite3.connect(settings.db_path, isolation_level=None,
+                               timeout=30)  # autocommit; generous busy-wait:
+        # WAL write-write collisions across processes (scan vs boot rescore vs
+        # refresh stream) should wait for the other writer, not raise.
         conn.row_factory = _row_factory
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode = WAL;")
