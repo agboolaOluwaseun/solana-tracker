@@ -1019,7 +1019,7 @@ async def add_channels(request: Request):
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
-app = Starlette(routes=[
+app_routes = [
     Route("/api/channels", channels),
     Route("/api/leaderboard", leaderboard),
     Route("/api/tokens", tokens),
@@ -1033,7 +1033,19 @@ app = Starlette(routes=[
     Route("/api/fetch", fetch_channels, methods=["POST"]),
     Route("/api/telegram-channels", telegram_channels),
     Route("/api/add-channels", add_channels, methods=["POST"]),
-], lifespan=_lifespan)
+]
+
+# AI chat is an optional surface: if this import ever fails the whole API
+# still serves the rest of the app (the module itself imports nothing heavy
+# at top level — requests/json/std only).
+try:
+    from api.aichat import ai_chat
+    app_routes.append(Route("/api/ai-chat", ai_chat, methods=["POST"]))
+except Exception:  # pragma: no cover - defensive per user's reliability rule
+    import logging as _log
+    _log.getLogger(__name__).exception("AI chat route disabled (import failed)")
+
+app = Starlette(routes=app_routes, lifespan=_lifespan)
 
 # The Next.js dev/prod server runs on :3000 and the browser fetches these
 # endpoints cross-origin, so CORS must be enabled for every frontend call.

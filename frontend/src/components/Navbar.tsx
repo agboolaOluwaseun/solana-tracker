@@ -10,6 +10,7 @@ const navItems = [
   { label: "Leaderboard", href: "/leaderboard" },
   { label: "Channels", href: "/" },
   { label: "Tokens", href: "/tokens" },
+  { label: "AI Chat", href: "/ai-chat" },
 ];
 
 export default function Navbar() {

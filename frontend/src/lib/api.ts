@@ -140,6 +140,31 @@ export const api = {
   fetch: (channelIds: number[], days?: number) =>
     post<{ success: boolean; results: Array<{ channel_id: number; success: boolean; message: string }> }>("/api/fetch", { channel_ids: channelIds, ...(days ? { days } : {}) }),
 };
+
+/** AI chat envelope. success:false + error kind is an EXPECTED outcome
+ * (no key, expired sub, rate limit) — never throw, the page renders it. */
+export interface AiChatResponse {
+  success: boolean;
+  reply?: string;
+  model?: string;
+  error?: string;
+  message?: string;
+}
+
+export async function aiChat(
+  messages: { role: "user" | "assistant"; content: string }[],
+): Promise<AiChatResponse> {
+  try {
+    return await post<AiChatResponse>("/api/ai-chat", { messages });
+  } catch (e) {
+    // network down / server offline — degrade to the same banner channel
+    return {
+      success: false,
+      error: "offline",
+      message: `Can't reach the local API server. Is uvicorn running? (${e instanceof Error ? e.message : "unknown error"})`,
+    };
+  }
+}
 /** Map store strategy ("50"|"100") to API strategy ("stoploss"|"normal"). */
 export function apiStrategy(s: string): string {
   return s === "50" ? "stoploss" : "normal";
