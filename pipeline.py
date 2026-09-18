@@ -487,6 +487,26 @@ def ensure_channel(
             "SELECT id, window_start, window_end FROM channels WHERE telegram_channel_id = ?",
             (telegram_channel_id,),
         ).fetchone()
+        if row is None and username:
+            # ID drift (see 2026-09-17 phantom incident): Telegram reported a
+            # different entity id for a channel we already track. The
+            # username is the stable identity — adopt the new id instead of
+            # minting a second row that would split the call history.
+            row = conn.execute(
+                "SELECT id, telegram_channel_id, window_start, window_end FROM channels "
+                "WHERE username = ? COLLATE NOCASE LIMIT 1",
+                (username,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE channels SET telegram_channel_id = ? WHERE id = ?",
+                    (telegram_channel_id, row["id"]),
+                )
+                log.warning(
+                    "channel id drift adopted: %s (db id %d) telegram id %d -> %d",
+                    username, int(row["id"]), int(row["telegram_channel_id"]),
+                    telegram_channel_id,
+                )
         if row:
             old_start = datetime.fromisoformat(row["window_start"].replace("Z", "")) if row["window_start"] else window_start
             old_end = datetime.fromisoformat(row["window_end"].replace("Z", "")) if row["window_end"] else window_end
