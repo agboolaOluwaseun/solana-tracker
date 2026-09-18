@@ -921,12 +921,24 @@ def telegram_channels(request):
             "SELECT telegram_channel_id, id, title, username FROM channels"
         ).fetchall()
         existing_map = {row["telegram_channel_id"]: row for row in existing}
+        # Username map too: on 2026-09-17 the dialog list reported channel
+        # ids that differed from the stored ones, every channel looked
+        # 'not in database', and Fetch re-added 11 phantom rows. Telegram
+        # usernames are globally unique, so either match counts as present.
+        user_map = {row["username"]: row for row in existing if row["username"]}
+        # Last resort for private channels (no username): title match against
+        # stored no-username rows only — id drift on 2026-09-17 hit the
+        # username-less channels (Cowboys x2, Ram J) as well.
+        title_map = {row["title"]: row for row in existing if not row["username"]}
         
         # Build response
         out = []
         for tc in telegram_channels:
             tg_id = tc["id"]
-            is_in_db = tg_id in existing_map
+            db_row = (existing_map.get(tg_id)
+                      or (user_map.get(tc["username"]) if tc.get("username") else None)
+                      or (title_map.get(tc["title"]) if not tc.get("username") else None))
+            is_in_db = db_row is not None
             
             out.append({
                 "telegram_id": tg_id,
@@ -934,7 +946,7 @@ def telegram_channels(request):
                 "username": tc["username"],
                 "type": tc["type"],
                 "in_database": is_in_db,
-                "db_id": existing_map[tg_id]["id"] if is_in_db else None,
+                "db_id": db_row["id"] if is_in_db else None,
             })
         
         # Sort: not-in-db first, then alphabetically
@@ -969,11 +981,20 @@ async def add_channels(request: Request):
             if not telegram_id or not title:
                 continue
             
-            # Check if already exists
-            existing = conn.execute(
-                "SELECT id FROM channels WHERE telegram_channel_id = ?",
-                (telegram_id,)
-            ).fetchone()
+            # Check if already exists — by telegram id, OR username (globally
+            # unique), OR title when neither has a username. The 2026-09-17
+            # id drift made every channel look new and 11 phantoms slipped in.
+            if username:
+                existing = conn.execute(
+                    "SELECT id FROM channels WHERE telegram_channel_id = ? OR username = ?",
+                    (telegram_id, username),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT id FROM channels WHERE telegram_channel_id = ? "
+                    "OR (username IS NULL AND title = ?)",
+                    (telegram_id, title),
+                ).fetchone()
             
             if existing:
                 added.append({"telegram_id": telegram_id, "db_id": existing["id"], "status": "exists"})
