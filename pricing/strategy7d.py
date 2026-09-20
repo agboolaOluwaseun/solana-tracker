@@ -72,6 +72,10 @@ class Eval7dResult:
     evaluation_end_timestamp: Optional[datetime] = None
     pool_address: Optional[str] = None
     note: str = ""
+    # Identity from pool resolution (token_meta/DexScreener) — applied to the
+    # calls row so every priced call shows a real ticker, not a bare address.
+    token_symbol: Optional[str] = None
+    token_name: Optional[str] = None
     # LIVE mode (evaluate_call_7d given `now` inside the 7d window):
     # the walk covered [call, now) only. All statuses are then PROVISIONAL:
     # a screening 'loss' may still flip to win (and max_multiple grows) in
