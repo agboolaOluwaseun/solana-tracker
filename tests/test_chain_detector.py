@@ -182,13 +182,15 @@ class TestDetectChainIntegration:
         mock_fallback.assert_called_once_with("0x1234567890abcdef1234567890abcdef12345678")
 
     @patch("chains.chain_detector.detect_chain_from_dexscreener")
-    def test_default_to_eth_when_all_fail(self, mock_fallback):
-        """Should default to Ethereum when all detection methods fail."""
+    def test_default_to_robinhood_when_all_fail(self, mock_fallback):
+        """Bare 0x with no context AND no pair found anywhere: legacy default
+        is 'robinhood' (bare-address callers in this deployment are RH;
+        defaulting to eth re-bucketed every unfindable RH call)."""
         text = "Random message"
         mock_fallback.return_value = None
         
         result = detect_chain(text, "0x1234567890abcdef1234567890abcdef12345678")
-        assert result == "eth"
+        assert result == "robinhood"
 
 
 class TestEdgeCases:

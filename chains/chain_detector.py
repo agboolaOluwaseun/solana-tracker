@@ -179,19 +179,23 @@ def detect_chain(text: str, address: str) -> str:
     if not address.startswith("0x"):
         return "sol"
     
-    # 1. Try context-based detection
+    # 1. Try context-based detection (URL / explicit tag)
     chain = detect_chain_from_context(text, address)
     if chain:
         return chain
     
-    # 2. Try DexScreener API fallback
+    # 2. Try DexScreener API fallback (pair found = authoritative chain)
     chain = detect_chain_from_dexscreener(address)
     if chain:
         return chain
     
-    # 3. Default to Ethereum for unknown EVM addresses
-    log.info(f"Chain detection fallback to 'eth' for {address[:10]}...")
-    return "eth"
+    # 3. No context AND no pair found anywhere: the token is unpriceable on
+    #    every chain, so this bucket only affects display/dedup — keep the
+    #    legacy default ('robinhood': channels posting bare 0x addresses in
+    #    this deployment, e.g. 666, are Robinhood callers). Defaulting to
+    #    'eth' here re-bucketed every unfindable RH call into Ethereum.
+    log.info(f"chain detection fallback to legacy 'robinhood' for {address[:10]}...")
+    return "robinhood"
 
 
 def get_ds_chain_id(internal_chain: str) -> str:

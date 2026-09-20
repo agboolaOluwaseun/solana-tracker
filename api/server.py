@@ -917,27 +917,15 @@ def telegram_channels(request):
         
         # Get existing channels in DB
         conn = get_connection()
-        existing = conn.execute(
-            "SELECT telegram_channel_id, id, title, username FROM channels"
-        ).fetchall()
-        existing_map = {row["telegram_channel_id"]: row for row in existing}
-        # Username map too: on 2026-09-17 the dialog list reported channel
-        # ids that differed from the stored ones, every channel looked
-        # 'not in database', and Fetch re-added 11 phantom rows. Telegram
-        # usernames are globally unique, so either match counts as present.
-        user_map = {row["username"]: row for row in existing if row["username"]}
-        # Last resort for private channels (no username): title match against
-        # stored no-username rows only — id drift on 2026-09-17 hit the
-        # username-less channels (Cowboys x2, Ram J) as well.
-        title_map = {row["title"]: row for row in existing if not row["username"]}
-        
+        # One shared matcher for every entry point (see pipeline.find_channel_row
+        # and the 2026-09-17 / 2026-09-20 phantom-duplicate incidents: Telegram
+        # entity ids drift TRANSIENTLY, so id-only matching mints duplicates).
+        from pipeline import find_channel_row
         # Build response
         out = []
         for tc in telegram_channels:
             tg_id = tc["id"]
-            db_row = (existing_map.get(tg_id)
-                      or (user_map.get(tc["username"]) if tc.get("username") else None)
-                      or (title_map.get(tc["title"]) if not tc.get("username") else None))
+            db_row = find_channel_row(conn, tg_id, tc.get("username"), tc.get("title"))
             is_in_db = db_row is not None
             
             out.append({
@@ -981,20 +969,11 @@ async def add_channels(request: Request):
             if not telegram_id or not title:
                 continue
             
-            # Check if already exists — by telegram id, OR username (globally
-            # unique), OR title when neither has a username. The 2026-09-17
-            # id drift made every channel look new and 11 phantoms slipped in.
-            if username:
-                existing = conn.execute(
-                    "SELECT id FROM channels WHERE telegram_channel_id = ? OR username = ?",
-                    (telegram_id, username),
-                ).fetchone()
-            else:
-                existing = conn.execute(
-                    "SELECT id FROM channels WHERE telegram_channel_id = ? "
-                    "OR (username IS NULL AND title = ?)",
-                    (telegram_id, title),
-                ).fetchone()
+            # Check if already exists via the shared stable-key cascade
+            # (id -> username -> title-for-keyless). The 09-17/09-20 id drifts
+            # made channels look new; matching by id alone minted phantoms.
+            from pipeline import find_channel_row
+            existing = find_channel_row(conn, telegram_id, username, title)
             
             if existing:
                 added.append({"telegram_id": telegram_id, "db_id": existing["id"], "status": "exists"})

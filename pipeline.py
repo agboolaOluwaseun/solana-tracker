@@ -467,6 +467,47 @@ def _checkpoint_scanned_at(channel_id: int, window_end: datetime) -> None:
         log.warning("failed to checkpoint last_scanned_at for channel %s", channel_id)
 
 
+def find_channel_row(conn, telegram_channel_id: int,
+                     username: Optional[str], title: Optional[str]):
+    """Locate an existing channels row for a Telegram channel via a stable-key
+    cascade.
+
+    Telegram entity ids have twice come back TRANSIENTLY WRONG from the
+    dialogs list (2026-09-17 and 2026-09-20 phantom-duplicate incidents), so
+    the id only rules when it matches exactly; username (globally unique) is
+    the strong fallback; title is the last resort and only matches keyless
+    legacy rows (username NULL/'') which have nothing else to match on.
+    Returns the row (id, username, telegram_channel_id, window_start,
+    window_end) or None."""
+    row = conn.execute(
+        "SELECT id, username, telegram_channel_id, window_start, window_end "
+        "FROM channels WHERE telegram_channel_id = ?",
+        (telegram_channel_id,),
+    ).fetchone()
+    if row:
+        return row
+    if username:
+        row = conn.execute(
+            "SELECT id, username, telegram_channel_id, window_start, window_end "
+            "FROM channels "
+            "WHERE username IS NOT NULL AND username <> '' "
+            "AND UPPER(username) = UPPER(?)",
+            (username,),
+        ).fetchone()
+        if row:
+            return row
+    if title:
+        row = conn.execute(
+            "SELECT id, username, telegram_channel_id, window_start, window_end "
+            "FROM channels "
+            "WHERE title = ? AND (username IS NULL OR username = '')",
+            (title,),
+        ).fetchone()
+        if row:
+            return row
+    return None
+
+
 def ensure_channel(
     channel_ref: str,
     telegram_channel_id: int,
@@ -483,31 +524,21 @@ def ensure_channel(
     ingestion_runs.
     """
     with transaction() as conn:
-        row = conn.execute(
-            "SELECT id, window_start, window_end FROM channels WHERE telegram_channel_id = ?",
-            (telegram_channel_id,),
-        ).fetchone()
-        if row is None and username:
-            # ID drift (see 2026-09-17 phantom incident): Telegram reported a
-            # different entity id for a channel we already track. The
-            # username is the stable identity — adopt the new id instead of
-            # minting a second row that would split the call history.
-            row = conn.execute(
-                "SELECT id, telegram_channel_id, window_start, window_end FROM channels "
-                "WHERE username = ? COLLATE NOCASE LIMIT 1",
-                (username,),
-            ).fetchone()
-            if row:
+        row = find_channel_row(conn, telegram_channel_id, username, title)
+        if row:
+            # Stable-key hit with a DIFFERENT telegram id = id drift (see
+            # 2026-09-17 / 2026-09-20 phantom incidents): adopt the new id
+            # instead of minting a second row that would split the history.
+            if int(row["telegram_channel_id"]) != int(telegram_channel_id):
                 conn.execute(
                     "UPDATE channels SET telegram_channel_id = ? WHERE id = ?",
                     (telegram_channel_id, row["id"]),
                 )
                 log.warning(
                     "channel id drift adopted: %s (db id %d) telegram id %d -> %d",
-                    username, int(row["id"]), int(row["telegram_channel_id"]),
-                    telegram_channel_id,
+                    username or title, int(row["id"]),
+                    int(row["telegram_channel_id"]), telegram_channel_id,
                 )
-        if row:
             old_start = datetime.fromisoformat(row["window_start"].replace("Z", "")) if row["window_start"] else window_start
             old_end = datetime.fromisoformat(row["window_end"].replace("Z", "")) if row["window_end"] else window_end
             new_start = min(old_start, window_start)
@@ -768,7 +799,9 @@ def apply_eval7d(call_id: int, r) -> None:
                 option2_entry = ?,
                 evaluation_end_timestamp = ?,
                 score_state = ?,
-                note = ?
+                note = ?,
+                token_symbol = COALESCE(?, token_symbol),
+                token_name = COALESCE(?, token_name)
             WHERE id = ?
             """,
             (
@@ -791,6 +824,11 @@ def apply_eval7d(call_id: int, r) -> None:
                 _iso(r.evaluation_end_timestamp) if r.evaluation_end_timestamp else None,
                 score_state_7d(r),
                 r.note,
+                # DEX-resolved identity wins when present (it's canonical);
+                # getattr keeps old/fake result objects without the field
+                # working — None preserves the stored guess.
+                getattr(r, "token_symbol", None),
+                getattr(r, "token_name", None),
                 call_id,
             ),
         )
@@ -906,6 +944,12 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
         entry_grace_minutes=settings.entry_grace_minutes,
         now=now,
     )
+    if pool_info:
+        # Carry the resolved identity onto the verdict so apply_eval7d can
+        # fill calls.token_symbol/token_name — every priced call shows its
+        # real ticker (user report: deep-dive was all bare addresses).
+        r.token_symbol = r.token_symbol or pool_info.get("symbol")
+        r.token_name = r.token_name or pool_info.get("name")
     result, sl = eval7d_to_legacy_pair(r)
     return result, sl, r
 
