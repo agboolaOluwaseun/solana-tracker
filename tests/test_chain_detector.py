@@ -102,6 +102,12 @@ class TestExplicitTagDetection:
         text = "Just a random message with no chain tag"
         assert detect_chain_from_context(text, "0x1234567890abcdef1234567890abcdef12345678") is None
 
+    def test_eth_as_currency_is_not_a_tag(self):
+        """Regression (id 2103): 'aped 32 eth' is a DOLLAR amount, not an
+        Ethereum chain tag — the separator must be required."""
+        text = "vitalik aped 32 eth on true and still hold\n\n0x21cfcfc3d8f98fc728f48341d10ad8283f6eb7ab"
+        assert detect_chain_from_context(text, "0x21cfcfc3d8f98fc728f48341d10ad8283f6eb7ab") is None
+
 
 class TestSolanaDetection:
     """Test Solana address detection (non-EVM)."""

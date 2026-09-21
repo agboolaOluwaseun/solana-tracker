@@ -50,22 +50,27 @@ CHAIN_URL_PATTERNS = {
 
 # Explicit tag patterns
 CHAIN_TAG_PATTERNS = {
+    # NOTE: the [:/-] separator is REQUIRED. With it optional, ordinary
+    # prose like "aped 32 eth and still hold" read as an Ethereum tag and
+    # mis-tagged Base tokens as eth (id 2103, wat is des, 2026-09-21).
+    # Tag-free messages fall through to the DexScreener liquidity probe,
+    # which is the authority we actually want for a bare address anyway.
     "eth": [
-        r"\b(ETH|Ethereum|Ethereum\s*mainnet)\s*[:\-]?\s*",
+        r"\b(ETH|Ethereum|Ethereum\s*mainnet)\s*[:\-]\s*",
         r"\b(ERC20|ERC-20)\b",
     ],
     "bsc": [
-        r"\b(BSC|BNB\s*Chain|Binance\s*Smart\s*Chain)\s*[:\-]?\s*",
+        r"\b(BSC|BNB\s*Chain|Binance\s*Smart\s*Chain)\s*[:\-]\s*",
         r"\b(BEP20|BEP-20)\b",
     ],
     "base": [
-        r"\b(Base|Base\s*Chain)\s*[:\-]?\s*",
+        r"\b(Base|Base\s*Chain)\s*[:\-]\s*",
     ],
     "arc": [
-        r"\b(Arc|Arc\s*Chain|Circle\s*Arc)\s*[:\-]?\s*",
+        r"\b(Arc|Arc\s*Chain|Circle\s*Arc)\s*[:\-]\s*",
     ],
     "robinhood": [
-        r"\b(Robinhood|RH)\s*[:\-]?\s*",
+        r"\b(Robinhood|RH)\s*[:\-]\s*",
     ]
 }
 
