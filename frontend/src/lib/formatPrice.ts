@@ -131,10 +131,13 @@ export function formatMultiplier(value: number | null, decimals: number = 1): st
 }
 
 /**
- * Format a large number with K/M/B suffixes.
+ * Format a large number with K/M/B/T suffixes — and for the absurd
+ * multipliers dust-entry tokens can produce (rescued calls with entry
+ * 1e-23), scientific notation beats 14 digits wrapping the stat line.
  */
 export function formatCompact(value: number | null): string {
   if (value === null || value === undefined) return "—";
+  if (value >= 1e12) return `${value.toExponential(1)}x`;
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
