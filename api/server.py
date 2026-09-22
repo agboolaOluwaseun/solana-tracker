@@ -558,6 +558,7 @@ async def _fetch_stream_inner(channel_ids, days, conn):
                         title=row["title"],
                         username=row["username"],
                         progress_cb=progress_cb,
+                        birdeye_rescue=True,  # initial fetch: rescue allowed
                     )
                 return result
             except Exception as e:
@@ -721,6 +722,7 @@ async def refresh_stream(request: Request):
                             username=row["username"],
                             progress_cb=progress_cb,
                             opportunistic=opportunistic,
+                            birdeye_rescue=False,
                         )
                 except Exception as e:
                     return e
@@ -885,6 +887,7 @@ async def fetch_channels(request: Request):
                         window_end=window_end.replace(tzinfo=None),
                         title=row["title"],
                         username=row["username"],
+                        birdeye_rescue=True,  # initial fetch: rescue allowed
                     )
                 results.append({
                     "channel_id": channel_id,

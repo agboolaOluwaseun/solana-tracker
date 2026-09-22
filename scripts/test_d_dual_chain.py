@@ -100,7 +100,8 @@ class _LiveEval:
         self.evaluation_end_timestamp = datetime.utcnow() + _td(days=7)
 
 
-def fake_price_one_call(chain, client, addr, call_ts, now=None):
+def fake_price_one_call(chain, client, addr, call_ts, now=None,
+                        allow_birdeye=False):
     """Zero-network provisional result; exercises the live lane of the loop."""
     from models import BacktestResult, StoplossResult
     r = _LiveEval(addr)

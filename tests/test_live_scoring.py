@@ -349,7 +349,8 @@ def live_env(tmp_path, monkeypatch):
 
     ctrl: dict = {"next": None}
 
-    def fake_price_one_call(chain, client, addr, call_ts, now=None):
+    def fake_price_one_call(chain, client, addr, call_ts, now=None,
+                            allow_birdeye=False):
         spec = ctrl["next"]
         fn = spec.get(addr) or spec["*"]
         return fn(now=now, call_ts=call_ts)

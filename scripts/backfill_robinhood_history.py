@@ -96,7 +96,8 @@ def main() -> int:
         try:
             prog = run_backfill(ref, window_start, window_end,
                                 title=r["title"], username=r["username"],
-                                progress_cb=cb)
+                                progress_cb=cb,
+                                birdeye_rescue=True)  # initial history scan
             print(f"  done: priced={prog.priced} unpriceable={prog.unpriceable}")
             ok += 1
         except Exception as e:

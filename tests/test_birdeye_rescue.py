@@ -193,7 +193,58 @@ def test_breaker_disables_after_repeated_failures(monkeypatch):
     assert br.enabled()
 
 
-# ---- persistence --------------------------------------------------------------
+# ---- pipeline gating: refresh must NEVER reach Birdeye ----------------------
+
+def test_price_one_call_rescue_is_opt_in(monkeypatch):
+    """allow_birdeye defaults False — only the initial-fetch call sites pass
+    True. The refresh stream / rescore / reprice inherit the default, so a
+    future refactor that forgets to pass the flag errs on NEVER calling
+    Birdeye (user policy 2026-09-22)."""
+    import pipeline
+    from pricing import backtest as bt
+
+    seen = []
+    monkeypatch.setattr(br, "try_rescue",
+                        lambda *a, **k: seen.append(k) or None)
+    # unresolvable everywhere -> engine lands on unpriceable_loss ('no pool')
+    monkeypatch.setattr(bt, "get_cached_pool",
+                        lambda addr, chain="sol": None)
+
+    class _NullDS:
+        def resolve_pool(self, addr, chain="solana"):
+            return None
+    monkeypatch.setattr(pipeline, "_get_ds_client", _NullDS)
+    monkeypatch.setattr(pipeline, "_get_v2_client", lambda chain: object())
+
+    br.reset_breaker()
+    _, _, r7 = pipeline.price_one_call("eth", None, ADDR, CALL_TS)
+    assert r7.status_plain == "unpriceable_loss"
+    assert seen == []                      # default: rescue NOT attempted
+
+    pipeline.price_one_call("eth", None, ADDR, CALL_TS, allow_birdeye=True)
+    assert len(seen) == 1                  # fetch path: rescue attempted
+
+
+def test_run_backfill_default_closed():
+    import inspect
+    import pipeline
+    sig = inspect.signature(pipeline.run_backfill)
+    assert sig.parameters["birdeye_rescue"].default is False
+    sig2 = inspect.signature(pipeline.price_one_call)
+    assert sig2.parameters["allow_birdeye"].default is False
+
+
+def test_refresh_stream_source_closed():
+    """Static guard: api/server.py's _one_channel (refresh) must pass
+    birdeye_rescue=False explicitly; fetch sites pass True."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "api" / "server.py"
+    text = src.read_text()
+    refresh = text.split("async def _one_channel")[1].split("async def")[0]
+    fetch1 = text.split("async def _fetch_stream_inner")[1].split("async def")[0]
+    assert "birdeye_rescue=False" in refresh
+    assert "birdeye_rescue=True" in fetch1
+    assert "birdeye_rescue" not in refresh.replace("birdeye_rescue=False", "")
 
 def test_apply_eval7d_adopts_rescued_chain(tmp_path, monkeypatch):
     """A rescued result's chain_corrected overwrites the stored tag; a

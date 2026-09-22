@@ -320,6 +320,7 @@ def run_backfill_action(channel_ref: str, preset: str, title: str | None = None)
                 username=username,
                 title=title,
                 progress_cb=cb,
+                birdeye_rescue=True,  # initial fetch: rescue allowed
             )
     except Exception as e:
         status.update(label=f"❌ {e}", state="error")

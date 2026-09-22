@@ -84,6 +84,7 @@ def main() -> int:
         username=username,
         fetch_limit=args.limit,
         progress_cb=_print_progress,
+        birdeye_rescue=True,  # initial scan: rescue allowed
     )
     return 0 if prog.stage != "error" else 1
 

@@ -881,8 +881,13 @@ def mark_waiting_7d(call_id: int) -> None:
 
 
 def price_one_call(chain: str, client, token_address: str, call_ts,
-                   now: Optional[datetime] = None):
+                   now: Optional[datetime] = None,
+                   allow_birdeye: bool = False):
     """Score one call under the configured engine.
+
+    allow_birdeye: opt-IN cross-chain rescue on unpriceable (user policy
+    2026-09-22: Birdeye may run ONLY during an initial channel fetch/scan —
+    refresh, reprice and live rescore must never call it).
 
     `now` (7d engine only): LIVE mode truncates the evaluation window at
     `now`, producing a PROVISIONAL verdict for calls younger than
@@ -957,7 +962,7 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
         # real ticker (user report: deep-dive was all bare addresses).
         r.token_symbol = r.token_symbol or pool_info.get("symbol")
         r.token_name = r.token_name or pool_info.get("name")
-    if r.status_plain == "unpriceable_loss":
+    if r.status_plain == "unpriceable_loss" and allow_birdeye:
         # Second opinion before condemning: the 2026-09 DB-wide sweep proved
         # 195/255 'unpriceable' rows had complete history on Birdeye (wrong
         # chain tag / aggregator blind spot). Cross-chain probe is address-
@@ -981,12 +986,18 @@ def run_backfill(
     pricing_source: str = "geckoterminal",
     progress_cb: ProgressCb = _noop,
     opportunistic: bool = False,
+    birdeye_rescue: bool = False,
 ) -> Progress:
     """
     Execute the full backfill for one channel/window. Resumable.
 
     channel_ref: the value passed to Telethon (e.g. '@some_channel').
     window_start/window_end: naive UTC datetimes.
+    birdeye_rescue: cross-chain Birdeye second opinion on unpriceables —
+        user policy (2026-09-22): ONLY an initial channel fetch/scan may
+        use it (fetch stream + Fetch button + backfill scripts pass True).
+        The refresh stream never passes it; live rescore / reprice call
+        price_one_call directly and can never touch Birdeye.
     opportunistic: background refresh runs pass True — their Telegram fetch
         yields to a user-initiated fetch (see ingestion.telegram_guard). On
         yield the run returns early with stage='yielded' WITHOUT persisting
@@ -1228,7 +1239,8 @@ def run_backfill(
                 result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts)
             else:
                 result, sl_result, r7 = price_one_call(chain, client, addr, call_ts,
-                                                       now=live_now)
+                                                       now=live_now,
+                                                       allow_birdeye=birdeye_rescue)
                 # Birdeye fallback: if GeckoTerminal couldn't price this token
                 # (no pool / no candles), try Birdeye which doesn't need pool
                 # resolution — it takes the token address directly.
