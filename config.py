@@ -51,6 +51,13 @@ class Settings:
 
     # Birdeye (alternative pricing source)
     birdeye_api_key: str = field(default_factory=lambda: os.getenv("BIRDEYE_API_KEY", ""))
+    # Cross-chain Birdeye rescue: when the 7d engine ends 'unpriceable',
+    # probe Birdeye address-first (no chain assumption) and, if it has the
+    # token's history, score through the same engine. Opt-out; auto-off
+    # without a key. See pricing/birdeye_rescue.py.
+    birdeye_rescue: bool = field(
+        default_factory=lambda: os.getenv("BIRDEYE_RESCUE", "true").strip().lower()
+        not in ("0", "false", "no", "off"))
 
     # Rate limits (requests per minute). Empirically (2026-08) GeckoTerminal's
     # "Cloudflare protection" is a rolling-window origin limiter that trips at

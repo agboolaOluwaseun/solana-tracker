@@ -76,6 +76,10 @@ class Eval7dResult:
     # calls row so every priced call shows a real ticker, not a bare address.
     token_symbol: Optional[str] = None
     token_name: Optional[str] = None
+    # Set when the Birdeye cross-chain rescue scored this call on a DIFFERENT
+    # chain than the stored tag — apply_eval7d persists it so every later
+    # pass resolves the pool on the right chain without needing Birdeye.
+    chain_corrected: Optional[str] = None
     # LIVE mode (evaluate_call_7d given `now` inside the 7d window):
     # the walk covered [call, now) only. All statuses are then PROVISIONAL:
     # a screening 'loss' may still flip to win (and max_multiple grows) in

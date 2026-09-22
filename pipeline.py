@@ -801,7 +801,8 @@ def apply_eval7d(call_id: int, r) -> None:
                 score_state = ?,
                 note = ?,
                 token_symbol = COALESCE(?, token_symbol),
-                token_name = COALESCE(?, token_name)
+                token_name = COALESCE(?, token_name),
+                chain = COALESCE(?, chain)
             WHERE id = ?
             """,
             (
@@ -829,6 +830,12 @@ def apply_eval7d(call_id: int, r) -> None:
                 # working — None preserves the stored guess.
                 getattr(r, "token_symbol", None),
                 getattr(r, "token_name", None),
+                # A Birdeye cross-chain rescue proved the stored chain tag
+                # was wrong; adopt the true chain so every FUTURE pass
+                # resolves the pool on the right network without needing
+                # Birdeye again. Only the rescue sets chain_corrected —
+                # normal verdicts pass None and never rewrite the tag.
+                getattr(r, "chain_corrected", None),
                 call_id,
             ),
         )
@@ -950,6 +957,16 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
         # real ticker (user report: deep-dive was all bare addresses).
         r.token_symbol = r.token_symbol or pool_info.get("symbol")
         r.token_name = r.token_name or pool_info.get("name")
+    if r.status_plain == "unpriceable_loss":
+        # Second opinion before condemning: the 2026-09 DB-wide sweep proved
+        # 195/255 'unpriceable' rows had complete history on Birdeye (wrong
+        # chain tag / aggregator blind spot). Cross-chain probe is address-
+        # first by design; returns None (verdict stands) on ANY failure,
+        # no key, or BIRDEYE_RESCUE=false. See pricing/birdeye_rescue.py.
+        from pricing.birdeye_rescue import try_rescue
+        rr = try_rescue(token_address, chain, call_ts, now=now)
+        if rr is not None:
+            r = rr
     result, sl = eval7d_to_legacy_pair(r)
     return result, sl, r
 
