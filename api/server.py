@@ -624,13 +624,42 @@ async def refresh_stream(request: Request):
     were walked through on a completed run, active and quiet channels alike)
     to now; falls back to last stored call, then 7 days, only for channels
     that have never completed a scan.
-    POST body: {} (no parameters needed)
+
+    BOOT GATE (user policy 2026-09-22): a boot refresh (no body) runs at
+    most once per 24h. If a completed run is younger, the stream instantly
+    emits 'skipped' and does nothing. An interrupted run RESUMES from the
+    channels that never completed (see ingestion/boot_refresh.py). The
+    manual 'Refresh All' button posts {force: true} and always runs; it
+    does not consume or extend the boot day.
+    POST body: {} (boot) | {"force": true} (manual Refresh All)
     """
     try:
         from datetime import datetime, timedelta, timezone
         from pipeline import run_backfill, Progress
         
         conn = get_connection()
+        
+        # ── daily boot gate ────────────────────────────────────────────────
+        force = False
+        try:
+            body = await request.json()
+            force = bool(body.get("force"))
+        except Exception:
+            pass
+        from ingestion import boot_refresh as BR
+        BR.ensure_gate_table()
+        due, _prior_token = BR.boot_refresh_due()
+        if not force and not due:
+            hrs = BR.hours_since_last_finished()
+            msg = (f"Already updated — channels auto-refresh once a day"
+                   + (f" (last completed {hrs:.0f}h ago)" if hrs is not None else ""))
+            async def _skip():
+                yield f"data: {json.dumps({'status': 'skipped', 'message': msg})}\n\n"
+                yield f"data: {json.dumps({'status': 'complete', 'skipped': True})}\n\n"
+            return StreamingResponse(_skip(), media_type="text/event-stream")
+        # NOTE: the run token is claimed INSIDE event_generator (first
+        # consumption), not here — a request that dies before streaming
+        # (client disconnect, 400 below) must never leave a half-open run.
         
         # Scan checkpoint (last_scanned_at) is the primary anchor: the newest
         # point messages were demonstrably walked through. Falling back to
@@ -755,17 +784,43 @@ async def refresh_stream(request: Request):
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
 
         async def event_generator():
+            # Claim the run token now that streaming actually begins (boot:
+            # new or resume of an interrupted run; manual force: token None
+            # -> every bookkeeping mark is a no-op).
+            gate_token = None if force else (BR.mark_boot_started() or _prior_token)
+            # Gate resume: a boot run continuing an interrupted one skips
+            # every channel already recorded done for this token (manual
+            # force-runs carry token=None -> empty set, full queue).
+            done_ids = BR.completed_channel_ids(gate_token)
+            remaining = [r for r in channels if r["id"] not in done_ids]
             # Announce the full queue up front so the UI can render every
             # channel as 'queued' immediately, then flip them to 'running'
             # one-by-one as this loop reaches each (sequential execution).
-            yield f"data: {json.dumps({'status': 'queue', 'channels': [{'channel_id': r['id'], 'title': r['title']} for r in channels]})}\n\n"
+            # Resumed channels are folded straight into 'done' so the n/total
+            # counter reflects real progress without pretending to rescan.
+            queue_payload = [
+                {"channel_id": r["id"], "title": r["title"],
+                 "status": "done" if r["id"] in done_ids else "queued"}
+                for r in channels
+            ]
+            yield f"data: {json.dumps({'status': 'queue', 'channels': queue_payload})}\n\n"
+            if done_ids:
+                yield f"data: {json.dumps({'status': 'resumed', 'message': f'resuming interrupted refresh — {len(done_ids)} channel(s) already done, {len(remaining)} to go'})}\n\n"
             deferred = []
-            for row in channels:
+            had_error = False
+            for row in remaining:
                 out = [None]
                 async for chunk in _one_channel(row, out, opportunistic=True):
                     yield chunk
                 if out[0] == 'yielded':
                     deferred.append(row)
+                elif out[0] == 'error':
+                    had_error = True
+                else:
+                    # done OR 'Already up to date' — either way this run
+                    # walked the channel fully; it won't need rescanning if
+                    # the boot run is interrupted right after.
+                    BR.mark_channel_done(gate_token, row["id"])
 
             # Retry lane: channels that paused for a user fetch get a second
             # pass once the fetch has released the Telegram session. Their
@@ -786,6 +841,10 @@ async def refresh_stream(request: Request):
                     out2: list = [None]
                     async for chunk in _one_channel(row, out2, opportunistic=False):
                         yield chunk
+                    if out2[0] == 'error':
+                        had_error = True
+                    elif out2[0] == 'done':
+                        BR.mark_channel_done(gate_token, row["id"])
             
             # Before finishing: refresh every provisional 'live' verdict
             # across the DB (calls whose 7d window is still open, plus young
@@ -819,6 +878,13 @@ async def refresh_stream(request: Request):
                     continue
             n_live = await _rt
             yield f"data: {json.dumps({'status': 'rescore_done', 'updated': n_live})}\n\n"
+
+            # Gate close: the 24h boot clock starts only on a FULLY clean
+            # run. With errored channels finished_at stays NULL, so the
+            # next page open resumes the same token and retries ONLY the
+            # failures (every other channel is already recorded done).
+            # Manual force runs carry token None -> this is a no-op.
+            BR.mark_boot_finished(gate_token, clean=not had_error)
 
             # Send completion
             yield f"data: {json.dumps({'status': 'complete'})}\n\n"

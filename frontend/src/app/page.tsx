@@ -46,7 +46,10 @@ export default function HomePage() {
   const refreshActive = useFetchStore((s) => s.refresh.active);
   const allDone = useFetchStore((s) => s.refresh.allDone);
   const feedVisible = useFetchStore(
-    (s) => s.refresh.active || (s.refresh.allDone && s.refresh.tasks.length > 0),
+    (s) =>
+      s.refresh.active ||
+      (s.refresh.allDone &&
+        (s.refresh.tasks.length > 0 || s.refresh.skipped)),
   );
   const clearFinished = useFetchStore((s) => s.clearFinished);
 
@@ -63,7 +66,7 @@ export default function HomePage() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const ran = await runRefreshStream();
+      const ran = await runRefreshStream(true);  // manual: always runs, bypasses daily boot gate
       if (ran) {
         setToast({ type: "success", message: "✓ All channels up to date" });
         setTimeout(() => setToast(null), 5000);
@@ -90,8 +93,10 @@ export default function HomePage() {
     }
   };
 
-  // Boot auto-update: refresh every channel (and rescore live verdicts) as
-  // soon as the page mounts, narrating into the bottom feed panel. Safe to
+  // Boot auto-update: fires on every page mount, but the SERVER-side daily
+  // gate (once per 24h) answers instantly with 'skipped' if today's run
+  // already completed — later launches within the day cost nothing. An
+  // interrupted run resumes from the channels that never finished. Safe to
   // fire twice (StrictMode) — runRefreshStream is a no-op while one runs —
   // and it never blocks rendering: the grid loads in parallel. A dropdown
   // fetch the user starts meanwhile runs CONCURRENTLY: the server makes the

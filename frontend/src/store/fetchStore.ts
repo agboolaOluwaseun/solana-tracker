@@ -64,6 +64,10 @@ interface RunState {
   feed: FeedLine[];
   /** Set once a refresh stream ended cleanly — panel says all up to date. */
   allDone: boolean;
+  /** Daily boot gate said "already updated today" — the run was a no-op
+   * (server emitted `skipped`). Panel shows an honest one-liner instead
+   * of a fake full queue. */
+  skipped: boolean;
 }
 
 interface FetchState {
@@ -85,7 +89,7 @@ const MAX_LOG = 12;
 const MAX_FEED = 80;
 
 function blankRun(): RunState {
-  return { tasks: [], feed: [], active: false, allDone: false };
+  return { tasks: [], feed: [], active: false, allDone: false, skipped: false };
 }
 
 function blankTask(it: { channel_id: number; title: string }): FetchTask {
@@ -130,10 +134,31 @@ function beginRunFor(prev: RunState, items: { channel_id: number; title: string 
           : [],
     active: true,
     allDone: false,
+    skipped: false,
   };
 }
 
 function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState {
+  // Daily boot gate no-op: the whole run was a single 'skipped' message.
+  // Don't seed tasks, don't claim a completion the run didn't produce —
+  // just narrate the honest one-liner.
+  if (data.status === "skipped") {
+    if (kind !== "refresh") return prev;
+    return {
+      ...prev,
+      tasks: [],
+      skipped: true,
+      feed: [{ ch: "—", line: data.message || "Already updated today" }],
+      active: true,
+      allDone: false,
+    };
+  }
+  // Resume notice from the gate: an interrupted run is continuing.
+  if (data.status === "resumed") {
+    if (kind !== "refresh") return prev;
+    const line = data.message || "resuming interrupted refresh…";
+    return { ...prev, feed: [...prev.feed, { ch: "—", line }].slice(-MAX_FEED) };
+  }
   // Stream-level rescore narration (refresh runs only).
   if (data.status === "rescore_start" || data.status === "rescore_done") {
     if (kind !== "refresh") return prev;
@@ -154,11 +179,21 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
     return { ...prev, feed: [...prev.feed, { ch: "—", line }].slice(-MAX_FEED) };
   }
   // 'queue' carries the whole channel list (no channel_id) — seed tasks.
+  // Items may arrive already 'done' (gate resume: finished in the earlier,
+  // interrupted pass) — seed them closed so the counter is honest.
   if (data.status === "queue" && data.channels) {
-    const merged = data.channels.map(
-      (f) => prev.tasks.find((t) => t.channel_id === f.channel_id) ?? blankTask(f),
-    );
-    const line = `updating ${merged.length} channel${merged.length === 1 ? "" : "s"}…`;
+    const merged = data.channels.map((f) => {
+      const base = prev.tasks.find((t) => t.channel_id === f.channel_id) ?? blankTask(f);
+      return f.status === "done"
+        ? { ...base, status: "done" as const, stage: "done",
+            lastMessage: base.lastMessage || "done in earlier pass", }
+        : { ...base, title: f.title };
+    });
+    const nDone = merged.filter((t) => t.status === "done").length;
+    const nLeft = merged.length - nDone;
+    const line = nDone
+      ? `resuming: ${nDone} channel(s) already updated, ${nLeft} to go…`
+      : `updating ${merged.length} channel${merged.length === 1 ? "" : "s"}…`;
     return {
       tasks: merged,
       feed:
@@ -167,6 +202,7 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
           : prev.feed,
       active: true,
       allDone: false,
+      skipped: false,
     };
   }
   if (!data.channel_id) return prev;
@@ -251,8 +287,9 @@ function endRunFor(prev: RunState, kind: RunKind): RunState {
     active: false,
     allDone:
       kind === "refresh" &&
-      prev.tasks.length > 0 &&
-      prev.tasks.every((t) => t.status === "done" || t.status === "error"),
+      (prev.skipped || // daily boot gate no-op — panel shows its one-liner
+        (prev.tasks.length > 0 &&
+          prev.tasks.every((t) => t.status === "done" || t.status === "error"))),
   };
 }
 
@@ -317,10 +354,12 @@ async function runStream(
 /** Boot auto-update + "Refresh All". Returns false if a refresh is already
  * running (the caller must not claim a fresh completion it didn't produce).
  * A concurrent user fetch does NOT block it — both streams run side by side;
- * the server makes the refresh's Telegram scans yield around the fetch. */
-export async function runRefreshStream(): Promise<boolean> {
+ * the server makes the refresh's Telegram scans yield around the fetch.
+ * `force` (the manual button) bypasses the server's once-per-day boot gate
+ * and always runs; boot callers use the default false. */
+export async function runRefreshStream(force = false): Promise<boolean> {
   if (useFetchStore.getState().refresh.active) return false;
-  await runStream("refresh", "/api/refresh-stream", {}, []);
+  await runStream("refresh", "/api/refresh-stream", force ? { force: true } : {}, []);
   return true;
 }
 
