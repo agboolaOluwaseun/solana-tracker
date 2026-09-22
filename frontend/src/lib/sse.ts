@@ -19,7 +19,7 @@ export interface SseEvent {
   waiting?: number;
   total_calls?: number;
   message?: string;
-  channels?: { channel_id: number; title: string }[];
+  channels?: { channel_id: number; title: string; status?: string }[];
   updated?: number;
 }
 
