@@ -193,6 +193,45 @@ def test_breaker_disables_after_repeated_failures(monkeypatch):
     assert br.enabled()
 
 
+def test_big_hourly_multiple_requires_minute_confirmation(monkeypatch):
+    """A rescued verdict whose hourly peak >= 50x is UNTRUSTED by itself
+    (CALI's 12,590x was one minute inside a 1H bar). try_rescue must demand
+    the wick-clipped 1m series; if that's unobtainable the suspect verdict
+    is refused, never persisted."""
+    monkeypatch.setattr(br, "find_chain", lambda a, c: "solana")
+    spike = hourly_rows([1.0] * 10 + [77.0] + [1.0] * 158)   # one 1H bar 77x
+    monkeypatch.setattr(br, "_get", lambda path, chain, params, kind, tries=3:
+                        FakeResp(spike if path == "/defi/ohlcv" else {"data": {"value": 1}}))
+    # no 1m available: _confirm_on_minutes sees <240 points -> None
+    monkeypatch.setattr(br, "_identity", lambda a, c: (None, "BIG", None))
+    r = br.try_rescue(ADDR, "sol", CALL_TS)
+    assert r is None, "suspect hourly-only verdict must be refused"
+
+
+def test_big_multiple_survives_when_minutes_agree(monkeypatch):
+    """Same 77x, but the 1m series shows the peak SUSTAINED across many
+    minutes (real pump, not a wick) -> confirmation passes and the win
+    persists."""
+    monkeypatch.setattr(br, "find_chain", lambda a, c: "solana")
+    spike = hourly_rows([1.0] * 10 + [77.0] + [1.0] * 158)
+    # 1m series: the 77x hour filled with ~50 real minutes at rising prices
+    t0 = int((CALL_TS - timedelta(hours=1)).replace(tzinfo=timezone.utc).timestamp()) // 3600 * 3600
+    m_items = [{"unixTime": t0 + 60 * k, "o": 1.0, "h": 70.0 if 60 <= k < 120 else 1.0,
+                "l": 1.0, "c": 70.0 if 60 <= k < 120 else 1.0, "vol": 1e3}
+               for k in range(1000)]
+    def fake_get(path, chain, params, kind, tries=3):
+        if path != "/defi/ohlcv":
+            return FakeResp({"data": {"value": 1}})
+        if params.get("type") == "1m":
+            return FakeResp({"success": True, "data": {"items": m_items}})
+        return FakeResp(spike)
+    monkeypatch.setattr(br, "_get", fake_get)
+    monkeypatch.setattr(br, "_identity", lambda a, c: (None, "BIG", None))
+    r = br.try_rescue(ADDR, "sol", CALL_TS)
+    assert r is not None and r.status_plain == "win"
+    assert "(1m wick-confirmed)" in r.note
+
+
 # ---- pipeline gating: refresh must NEVER reach Birdeye ----------------------
 
 def test_price_one_call_rescue_is_opt_in(monkeypatch):

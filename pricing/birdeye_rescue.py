@@ -200,6 +200,78 @@ def _identity(addr: str, ext_chain: str):
     return None, None, None
 
 
+def _confirm_on_minutes(addr: str, bc: str, ts: datetime, pool_addr,
+                        now: Optional[datetime]) -> Optional[Eval7dResult]:
+    """Re-score on wick-clipped 1m bars (segments of <1000 min per request).
+    Returns None if the 1m series is unobtainable/too thin to trust — the
+    caller then REFUSES the suspect hourly verdict instead of persisting it.
+
+    Wick rule (proven on CALI): a bar's high is a spike if it is >2x the
+    bar's own body-max AND the next bar opens below half of it (rejected
+    within one minute) -> clip high to body envelope. Symmetric for lows.
+    """
+    try:
+        pts: dict[datetime, PricePoint] = {}
+        d0 = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        # 1m caps ~1000/request -> 12h segments over the [call-1d, call+8d] span
+        cur = d0 - timedelta(days=1)
+        horizon = ts + timedelta(days=8)
+        empty_streak = 0
+        while cur < horizon:
+            nxt = cur + timedelta(hours=12)
+            seg = _ohlcv_points(addr, bc,
+                                int(cur.replace(tzinfo=timezone.utc).timestamp()),
+                                int(nxt.replace(tzinfo=timezone.utc).timestamp()), "1m")
+            for p in seg:
+                pts[p.timestamp] = p
+            empty_streak = empty_streak + 1 if not seg else 0
+            if empty_streak >= 8:   # two days of nothing: series is dead
+                break
+            cur = nxt
+        if len(pts) < 240:  # under 4 hours of minute data across a week
+            return None
+        series = [pts[k] for k in sorted(pts)]
+        clean: list[PricePoint] = []
+        for i, p in enumerate(series):
+            body_hi = max(p.open, p.close, p.low)
+            body_lo = min(p.open, p.close, p.high)
+            nxt_o = series[i + 1].open if i + 1 < len(series) else p.close
+            h, lo = p.high, p.low
+            if h > body_hi * 2 and nxt_o < h * 0.5:
+                h = body_hi
+            if body_lo > 0 and lo < body_lo * 0.5 and nxt_o > body_lo * 2:
+                lo = body_lo
+            clean.append(PricePoint(timestamp=p.timestamp, open=p.open, high=h,
+                                    low=lo, close=p.close, volume=p.volume))
+        # hourly aggregates from the cleaned minutes
+        byh: dict[datetime, dict] = {}
+        for p in clean:
+            key = p.timestamp.replace(minute=0, second=0)
+            b = byh.setdefault(key, {"o": p.open, "h": p.high, "l": p.low, "c": p.close})
+            b["h"] = max(b["h"], p.high)
+            b["l"] = min(b["l"], p.low)
+            b["c"] = p.close
+        hourly = [PricePoint(t, b["o"], b["h"], b["l"], b["c"], 0.0)
+                  for t, b in sorted(byh.items())]
+
+        def fetch_hourly(pool, token, a, b):
+            return [p for p in hourly if a <= p.timestamp <= b], 0
+
+        def fetch_minute(pool, token, a, b):
+            return [p for p in clean if a <= p.timestamp <= b], 1
+
+        r = evaluate_call_7d(pool_addr or addr, addr, ts, fetch_hourly, fetch_minute,
+                             eval_days=settings.eval_days,
+                             entry_grace_minutes=settings.entry_grace_minutes,
+                             now=now)
+        if r.status_plain == "unpriceable_loss":
+            return None
+        return r
+    except Exception:  # noqa: BLE001
+        log.exception("1m confirmation failed for %s", addr[:12] + "…")
+        return None
+
+
 def try_rescue(token_address: str, chain: str, call_ts: datetime,
                now: Optional[datetime] = None) -> Optional[Eval7dResult]:
     """Return a scored Eval7dResult (status win/loss, `chain_corrected` set)
@@ -244,6 +316,27 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
                              entry_grace_minutes=settings.entry_grace_minutes,
                              now=now)
         if r.status_plain == "unpriceable_loss":
+            return None
+        # Data-quality confirmation (2026-09 lessons): hourly highs can be
+        # single-minute WICKS (one trade through a thin pool prints a high
+        # thousands of x its own body, rejected next bar — CALI's 12,590x)
+        # or SCALE DUST (a decimal re-base mid-series turns dust entries
+        # into 1e17x — the Minty incident). Any big multiple or a dust
+        # entry gets re-scored on wick-clipped 1m bars before we believe
+        # it; the 1m pull only happens in those rare suspect cases.
+        big = (r.max_multiple or 0) >= 50 or (r.entry_price_usd or 1) < 1e-15
+        if big and r.status_plain != "unpriceable_loss":
+            rr = _confirm_on_minutes(token_address, bc, ts, pool_addr, now)
+            if rr is not None:
+                rr.token_symbol = sym or None
+                rr.token_name = nm or None
+                rr.pool_address = rr.pool_address or pool_addr or token_address
+                rr.note = (rr.note + " (1m wick-confirmed)").strip()
+                rr.chain_corrected = TO_INTERNAL.get(bc, bc)
+                return rr
+            # 1m unobtainable: the hourly verdict is suspect by definition —
+            # refuse to fabricate a verdict from data we know is corrupted
+            # at exactly the magnitude that decided it.
             return None
         r.token_symbol = sym or None
         r.token_name = nm or None
