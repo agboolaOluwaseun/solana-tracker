@@ -51,7 +51,7 @@ def tier_counts(channel_id: int, window: str, strategy: str = "normal",
     chain_sql, chain_params = (
         (" AND cal.chain = ?", [chain]) if chain not in (None, "all") else ("", [])
     )
-    if strategy == "stoploss":
+    if strategy in ("stoploss", "trailing"):
         q = f"""
             SELECT COALESCE(cal.max_multiple, cal.peak_multiple,
                             1.0 + cal.peak_profit_pct / 100.0) AS m,

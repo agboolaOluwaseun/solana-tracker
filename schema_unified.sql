@@ -136,3 +136,32 @@ CREATE TABLE IF NOT EXISTS stoploss_results (
     UNIQUE(call_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sl_status ON stoploss_results(status);
+
+-- Strategy 3: 50% TRAILING stop-loss. Stop = 50% of the running peak (never
+-- falls). WIN = 2x entry reached before the trailing stop triggered; LOSS =
+-- a candle low reached half the running peak first. exit_multiple = the
+-- FRACTION OF CAPITAL RETURNED at the stop-out (peak/2; for STOP-OUT losses
+-- always 0.5..1.0 since peak<2x — a guaranteed loss floored at 50%; held-
+-- to-end losses record the final close, hit_trailing_stop=0, which may be
+-- >=1.0 — the strategy still says "didn't reach 2x"). loss_pct =
+-- (exit_multiple-1)*100 -> e.g. peak 1.8x, out 0.9x = -10%.
+CREATE TABLE IF NOT EXISTS trailing_results (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id           INTEGER NOT NULL REFERENCES calls(id),
+    entry_price_usd   REAL,
+    peak_multiple     REAL,               -- running peak at/behind the stop-out
+    peak_profit_pct   REAL,               -- (peak_multiple-1)*100 for AVG readers
+    peak_price_usd    REAL,
+    peak_timestamp    TEXT,
+    exit_multiple     REAL,               -- peak/2 for losses (capital returned)
+    exit_price_usd    REAL,
+    exit_timestamp    TEXT,
+    loss_pct          REAL,               -- (exit_multiple-1)*100, negative on loss
+    hit_trailing_stop INTEGER NOT NULL DEFAULT 0,
+    is_win            INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'pending',   -- win|loss|unpriceable_loss|pending
+    error             TEXT,
+    computed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tr_status ON trailing_results(status);

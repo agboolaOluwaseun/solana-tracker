@@ -63,6 +63,13 @@ export interface ApiCall {
   is_win: number;
   status: string;
   multiplier: number | null;
+  // Trailing-strategy overlay (only present when ?strategy=trailing):
+  // a stop-out records exit_multiple = peak/2 (the x of capital returned)
+  // and loss_pct = (exit_multiple - 1) * 100.
+  trailing_peak_multiple?: number | null;
+  exit_multiple?: number | null;
+  exit_timestamp?: string | null;
+  loss_pct?: number | null;
 }
 
 export interface ApiTokenCallEntry {
@@ -130,8 +137,8 @@ export const api = {
     get<ApiBucket[]>(`/api/channels/${encodeURIComponent(handle)}/buckets?strategy=${strategy}&window=${window}&chain=${chain}`),
   streak: (handle: string, strategy: string, chain: string) =>
     get<{ streak: number }>(`/api/channels/${encodeURIComponent(handle)}/streak?strategy=${strategy}&chain=${chain}`),
-  calls: (handle: string, window: string, chain: string) =>
-    get<ApiCall[]>(`/api/channels/${encodeURIComponent(handle)}/calls?window=${window}&chain=${chain}`),
+  calls: (handle: string, window: string, chain: string, strategy: string = "normal") =>
+    get<ApiCall[]>(`/api/channels/${encodeURIComponent(handle)}/calls?window=${window}&chain=${chain}&strategy=${strategy}`),
   tiers: (handle: string, chain: string, strategy: string, days: number | null, window: string) =>
     get<ApiTiersResponse>(
       `/api/channels/${encodeURIComponent(handle)}/tiers?chain=${chain}&strategy=${strategy}` +
@@ -165,9 +172,10 @@ export async function aiChat(
     };
   }
 }
-/** Map store strategy ("50"|"100") to API strategy ("stoploss"|"normal"). */
+/** Map store strategy ("50"|"100"|"trail") to API strategy
+ *  ("stoploss"|"normal"|"trailing"). */
 export function apiStrategy(s: string): string {
-  return s === "50" ? "stoploss" : "normal";
+  return s === "50" ? "stoploss" : s === "trail" ? "trailing" : "normal";
 }
 
 /** Deterministic initials avatar (data-URI SVG) from a title/seed. */

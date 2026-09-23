@@ -655,6 +655,177 @@ def persist_stoploss_result(call_id: int, sl) -> None:
                 sl.error,
             ),
         )
+    # Strategy 3 rides every pricing pass for free: the candles the engine
+    # just fetched are in price_cache, so the trailing verdict is computed
+    # cache-only (zero API). Never allowed to break the main persist path.
+    try:
+        score_trailing_call(call_id)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "trailing attach failed for call %s", call_id)
+
+
+# ---- Strategy 3: 50% TRAILING stop (cache-only, rides every pricing pass) --
+
+def persist_trailing_result(call_id: int, tr) -> None:
+    """Write a trailing-stop result to trailing_results (upsert on call_id)."""
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO trailing_results
+                (call_id, entry_price_usd, peak_multiple, peak_profit_pct,
+                 peak_price_usd, peak_timestamp, exit_multiple, exit_price_usd,
+                 exit_timestamp, loss_pct, hit_trailing_stop, is_win, status,
+                 error, computed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(call_id) DO UPDATE SET
+                entry_price_usd=excluded.entry_price_usd,
+                peak_multiple=excluded.peak_multiple,
+                peak_profit_pct=excluded.peak_profit_pct,
+                peak_price_usd=excluded.peak_price_usd,
+                peak_timestamp=excluded.peak_timestamp,
+                exit_multiple=excluded.exit_multiple,
+                exit_price_usd=excluded.exit_price_usd,
+                exit_timestamp=excluded.exit_timestamp,
+                loss_pct=excluded.loss_pct,
+                hit_trailing_stop=excluded.hit_trailing_stop,
+                is_win=excluded.is_win,
+                status=excluded.status,
+                error=excluded.error,
+                computed_at=datetime('now')
+            """,
+            (
+                call_id,
+                tr.entry_price_usd,
+                tr.peak_multiple,
+                (tr.peak_multiple - 1.0) * 100.0 if tr.peak_multiple else None,
+                tr.peak_price_usd,
+                _iso(tr.peak_timestamp) if tr.peak_timestamp else None,
+                tr.exit_multiple,
+                tr.exit_price_usd,
+                _iso(tr.exit_timestamp) if tr.exit_timestamp else None,
+                tr.loss_pct,
+                1 if tr.hit_trailing_stop else 0,
+                1 if tr.is_win else 0,
+                tr.status,
+                tr.error,
+            ),
+        )
+
+
+def _trailing_series(conn, call_row) -> list:
+    """Candle series for one call, cache-only: dense minute bars when they
+    cover the window well (>=60% of hours have >=45 min each), else hourly.
+    Empty list = nothing scored yet for this pool (skip, not a verdict)."""
+    ts = datetime.fromisoformat(str(call_row["call_timestamp"]).replace("Z", ""))
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    end = ts + timedelta(days=settings.eval_days)
+    pool, token = call_row["pool_address"], call_row["token_address"]
+    if not pool:
+        return []
+    hours = conn.execute(
+        "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
+        "WHERE pool_address=? AND aggregate='hour' AND candle_ts>=? AND candle_ts<? "
+        "ORDER BY candle_ts",
+        (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+    mins = conn.execute(
+        "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
+        "WHERE pool_address=? AND aggregate='minute' AND candle_ts>=? AND candle_ts<? "
+        "ORDER BY candle_ts",
+        (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+    from models import PricePoint
+    def _pt(r):
+        return PricePoint(
+            timestamp=datetime.fromisoformat(str(r["candle_ts"]).replace("Z", "")),
+            open=r["open"], high=r["high"], low=r["low"], close=r["close"],
+            volume=r["volume"] or 0.0)
+    if not hours:
+        # Some pools (the fixed-stop strategy's minute-first path) cached
+        # ONLY 1m bars — use them directly; finer resolution is strictly
+        # better here (minute-precision exits).
+        return [_pt(m) for m in mins]
+    # Dense minute coverage (>=60% of the hourly span) means the engine
+    # deep-checked this window; prefer minutes, else hourly.
+    if mins and len(mins) >= 0.6 * len(hours) * 60:
+        return [_pt(m) for m in mins]
+    return [_pt(h) for h in hours]
+
+
+def score_trailing_call(call_id: int) -> Optional[str]:
+    """Compute + persist the trailing verdict for one call from CACHED
+    candles only (zero API). Returns the status, or None when no candles
+    are cached yet (call stays untrailing; the next pass retries)."""
+    from pricing.trailing import score_candles_trailing
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, pool_address, token_address, call_timestamp, score_state"
+            " FROM calls WHERE id=?", (call_id,)).fetchone()
+        if row is None:
+            return None
+        candles = _trailing_series(conn, row)
+    if not candles:
+        return None
+    ts = datetime.fromisoformat(str(row["call_timestamp"]).replace("Z", ""))
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    tr = score_candles_trailing(candles, ts,
+                                win_multiplier=settings.win_multiplier
+                                if hasattr(settings, "win_multiplier") else 2.0,
+                                pool_address=row["pool_address"])
+    if tr.status == "unpriceable_loss":
+        return None
+    # OPEN-WINDOW RULE: a call still inside its 7d window (score_state
+    # 'live') whose trailing stop HASN'T triggered is undecided — the
+    # "held to the end" verdict only becomes real at the day-7 cutoff.
+    # Persist it as pending (retry on every rescore pass) unless the stop
+    # itself already fired (a triggered stop-out is final regardless).
+    score_state = row["score_state"] if "score_state" in row.keys() else "final"
+    if score_state == "live" and tr.status == "loss" and not tr.hit_trailing_stop:
+        tr.status = "pending"
+    persist_trailing_result(call_id, tr)
+    return tr.status
+
+
+def run_trailing_backfill(progress_cb: ProgressCb = _noop,
+                          limit: Optional[int] = None) -> Progress:
+    """One cache-only pass: score every decided call that has no trailing
+    row yet (or re-score live-window calls whose verdict may mature).
+    Reads price_cache exclusively — zero network, safe to run any time."""
+    init_db()
+    progress = Progress(stage="price")
+    progress_cb(progress)
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT cal.id FROM calls cal
+               LEFT JOIN trailing_results tr ON tr.call_id = cal.id
+               WHERE cal.status IN ('win','loss')
+                 AND (tr.id IS NULL
+                      OR cal.score_state='live'
+                      OR (cal.score_state='final' AND tr.status NOT IN ('win','loss')))
+               ORDER BY cal.id"""
+            + (f" LIMIT {int(limit)}" if limit else "")
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+    total = len(ids)
+    progress.total_calls = total
+    progress_cb(progress)
+    done = skipped = 0
+    for i, cid in enumerate(ids, start=1):
+        st = score_trailing_call(cid)
+        if st is None:
+            skipped += 1
+        else:
+            done += 1
+        progress.priced = done
+        progress.scanned = i
+        progress.message = f"[{i}/{total}] trailing: {st or 'no candles yet'}"
+        progress_cb(progress)
+    progress.stage = "done"
+    progress.message = (f"trailing pass done — {done} scored, {skipped} waiting"
+                        f" on candles")
+    progress_cb(progress)
+    return progress
 
 
 # ---- Engine dispatcher (Workstream C) --------------------------------------

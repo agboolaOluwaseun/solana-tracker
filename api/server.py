@@ -251,6 +251,7 @@ def channel_streak(request):
 def channel_calls(request):
     handle = request.path_params["handle"]
     window = request.query_params.get("window", "all")
+    strategy = request.query_params.get("strategy", "normal")
     chain = _chain(request, default="all")
     row = _resolve(handle)
     if not row:
@@ -276,6 +277,29 @@ def channel_calls(request):
         params.append(since.replace(microsecond=0).isoformat() + "Z")
     q += " ORDER BY call_timestamp DESC"
     rows = conn.execute(q, params).fetchall()
+    # Strategy overlays: when stoploss/trailing is selected, each tile must
+    # show THAT strategy's verdict (is_win/peak), not the plain one — and
+    # trailing adds the stop-out x (capital returned) + exit time. Rows the
+    # overlay has no result for keep their plain verdict (best-effort, the
+    # header/tiers denominator already excludes them).
+    overlay: dict = {}
+    if strategy in ("stoploss", "trailing") and _unified():
+        tbl = "stoploss_results" if strategy == "stoploss" else "trailing_results"
+        cols = ("sr.peak_profit_pct, sr.is_win, NULL AS exit_multiple, "
+                "NULL AS exit_timestamp, NULL AS trailing_peak_multiple, NULL AS trailing_peak_timestamp, "
+                "NULL AS loss_pct"
+                if strategy == "stoploss" else
+                "(sr.peak_multiple - 1) * 100 AS peak_profit_pct, sr.is_win, "
+                "sr.exit_multiple, sr.exit_timestamp, "
+                "sr.peak_multiple AS trailing_peak_multiple, "
+                "sr.peak_timestamp AS trailing_peak_timestamp, "
+                "sr.loss_pct")
+        orow = conn.execute(f"""
+            SELECT cal.id, {cols}
+            FROM calls cal JOIN {tbl} sr ON sr.call_id = cal.id
+            WHERE cal.channel_id = ? AND sr.status IN ('win','loss')
+        """, (row["id"],)).fetchall()
+        overlay = {o["id"]: o for o in orow}
     out = []
     for r in rows:
         entry = r["entry_price_usd"]
@@ -289,6 +313,16 @@ def channel_calls(request):
         if unified:
             d["which_first"] = d.pop("which_threshold_first", None)
             d["granular"] = d.pop("granular_analysis_required", None)
+        ov = overlay.get(d["id"])
+        if ov is not None:
+            d["is_win"] = ov["is_win"]
+            d["peak_profit_pct"] = ov["peak_profit_pct"]
+            if strategy == "trailing":
+                d["trailing_peak_multiple"] = ov["trailing_peak_multiple"]
+                d["trailing_peak_timestamp"] = ov["trailing_peak_timestamp"]
+                d["exit_multiple"] = ov["exit_multiple"]
+                d["exit_timestamp"] = ov["exit_timestamp"]
+                d["loss_pct"] = ov["loss_pct"]
         out.append(d)
     return _j(out)
 

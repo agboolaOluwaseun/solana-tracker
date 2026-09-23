@@ -28,7 +28,7 @@ export default function ChannelDeepdivePage() {
     Promise.all([
       api.detail(handle, s, timeWindow, deepDiveChain),
       api.buckets(handle, s, timeWindow, deepDiveChain),
-      api.calls(handle, timeWindow, deepDiveChain),
+      api.calls(handle, timeWindow, deepDiveChain, s),
     ])
       .then(([d, b, c]) => {
         if (cancelled) return;
@@ -119,7 +119,12 @@ export default function ChannelDeepdivePage() {
               : "— avg"}
           </span>
           <span className="text-[var(--text-muted)]">
-            {strategy === "50" ? "(-50% strategy)" : "(normal strategy)"} · {timeWindow}
+            {strategy === "50"
+              ? "(-50% strategy)"
+              : strategy === "trail"
+                ? "(trailing-50% strategy)"
+                : "(normal strategy)"}{" "}
+            · {timeWindow}
             {deepDiveChain !== "sol" && (
               <> · {deepDiveChain === "robinhood" ? "Robinhood" : "All chains"}</>
             )}
@@ -237,6 +242,19 @@ export default function ChannelDeepdivePage() {
                 {" · "}
                 {call.peak_profit_pct != null ? `${call.peak_profit_pct.toFixed(0)}%` : "—"}
               </p>
+              {/* Trailing stop-out detail: how deep the ride fell before the
+                  trailing floor caught it. 0.9x exit = LOSS -10% (capital
+                  returned is 90 cents per dollar — the pump was unrealized
+                  and given back). */}
+              {strategy === "trail" && !call.is_win && call.exit_multiple != null && (
+                <p className="text-[var(--text-muted)]">
+                  out @ {call.exit_multiple.toFixed(2)}x
+                  {call.loss_pct != null ? ` · ${call.loss_pct.toFixed(0)}%` : ""}
+                  {call.trailing_peak_multiple != null
+                    ? ` (peak ${call.trailing_peak_multiple.toFixed(1)}x)`
+                    : ""}
+                </p>
+              )}
               <p className="text-[var(--text-muted)]">{new Date(call.call_timestamp).toLocaleDateString()}</p>
             </div>
           </div>

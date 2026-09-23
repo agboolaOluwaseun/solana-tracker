@@ -75,6 +75,32 @@ class StoplossResult:
 
 
 @dataclass
+class TrailingResult:
+    """Strategy 3 — 50% TRAILING stop. Stop floor = half the RUNNING PEAK
+    (never falls). WIN = 2x entry touched before the trailing stop triggers;
+    LOSS = a candle low fell to half the peak formed by EARLIER candles.
+    A candle that both prints a fresh high and breaks peak/2 is the same-
+    candle tie — WIN for all strategies (user rule), same as the 7d engine.
+    For a loss: exit_multiple = peak/2 relative to entry = FRACTION OF
+    CAPITAL RETURNED (peak<2x in every loss -> exit in [0.5, 1.0), always a
+    real loss); loss_pct = (exit_multiple - 1) * 100 (negative)."""
+    entry_price_usd: Optional[float]
+    peak_multiple: Optional[float]          # running peak / entry (whole window on win)
+    peak_price_usd: Optional[float]
+    peak_timestamp: Optional[datetime]
+    exit_multiple: Optional[float]          # peak/2 on loss (capital returned); None on win
+    exit_price_usd: Optional[float]
+    exit_timestamp: Optional[datetime]      # candle that triggered the stop (hour precision)
+    loss_pct: Optional[float]               # (exit_multiple-1)*100 on loss; None on win
+    hit_trailing_stop: bool
+    is_win: bool
+    status: str                             # win|loss|unpriceable_loss|pending
+    pool_address: Optional[str] = None
+    candles_used: int = 0
+    error: Optional[str] = None
+
+
+@dataclass
 class ChannelStats:
     """Aggregate metrics for one channel over the window."""
     channel_id: int

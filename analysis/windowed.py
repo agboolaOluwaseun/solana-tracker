@@ -50,17 +50,25 @@ def _strategy_join(strategy: str) -> str:
 
     Denominator = decided calls only (win + loss). Unpriceable AND pending
     (incl. immature) are excluded from every metric.
+    'trailing' (strategy 3, 50% trailing stop) shares the 'sr' alias with
+    stoploss so every downstream sr.<col> reference works unchanged —
+    trailing_results carries the same is_win/status/peak_profit_pct columns.
     """
     if strategy == "stoploss":
         return (
             "JOIN stoploss_results sr ON sr.call_id = cal.id "
             "AND sr.status IN ('win','loss')"
         )
+    if strategy == "trailing":
+        return (
+            "JOIN trailing_results sr ON sr.call_id = cal.id "
+            "AND sr.status IN ('win','loss')"
+        )
     return "AND cal.status IN ('win','loss')"
 
 
 def _win_col(strategy: str) -> str:
-    return "sr.is_win" if strategy == "stoploss" else "cal.is_win"
+    return "sr.is_win" if strategy in ("stoploss", "trailing") else "cal.is_win"
 
 
 def _chain_clause(chain: Optional[str]) -> tuple[str, list]:
@@ -77,7 +85,7 @@ def channel_stats_window(channel_id: int, window: str, strategy: str,
     conn = get_connection()
     win_col = _win_col(strategy)
     chain_sql, chain_params = _chain_clause(chain)
-    if strategy == "stoploss":
+    if strategy in ("stoploss", "trailing"):
         q = f"""
             SELECT COUNT(sr.id) AS total_calls, SUM(sr.is_win) AS wins,
                    AVG(sr.peak_profit_pct) AS avg_peak_profit_pct
@@ -130,7 +138,7 @@ def channel_buckets(channel_id: int, window: str, strategy: str,
         where += " AND cal.call_timestamp >= ?"
         params.append(_iso(since))
 
-    if strategy == "stoploss":
+    if strategy in ("stoploss", "trailing"):
         base = f"FROM calls cal {join} WHERE {where}"
         sel = f"SELECT cal.call_timestamp AS ts, sr.is_win AS w, sr.peak_profit_pct AS p {base}"
     else:
@@ -166,7 +174,7 @@ def current_streak(channel_id: int, strategy: str,
     conn = get_connection()
     win_col = _win_col(strategy)
     chain_sql, chain_params = _chain_clause(chain)
-    if strategy == "stoploss":
+    if strategy in ("stoploss", "trailing"):
         q = f"""
             SELECT sr.is_win AS w FROM calls cal {_strategy_join(strategy)}
             WHERE cal.channel_id = ?{chain_sql} ORDER BY cal.call_timestamp DESC
