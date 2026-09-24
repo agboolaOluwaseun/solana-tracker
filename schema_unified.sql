@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS token_meta (
     name          TEXT,
     dex_pool_id   TEXT,
     liquidity_usd REAL,
+    quote_symbol  TEXT,            -- the paired side's ticker (orientation guard)
+    pool_is_base  INTEGER,         -- 1 called token holds GT's base seat;
+                                   -- 0 flipped (curve is the OTHER asset);
+                                   -- NULL never checked
     first_seen    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (chain, address)
 );

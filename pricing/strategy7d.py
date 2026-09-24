@@ -54,6 +54,8 @@ class Eval7dResult:
     status_plain: str                 # 'win' | 'loss' | 'unpriceable_loss'
     status_stoploss: str              # 'win'|'loss'|'unpriceable_loss'|'expired'|'pending'
     final_close_usd: Optional[float] = None   # last close in window — the mark-to-market for 'expired'
+    pool_price_usd: Optional[float] = None    # DS's quote of the token at resolve time
+                                              # (orientation-guard input; not persisted)
     screening_entry_usd: Optional[float] = None
     screening_target_usd: Optional[float] = None
     entry_price_usd: Optional[float] = None

@@ -1036,10 +1036,27 @@ def score_state_7d(r) -> str:
         return "final"
     if r.status_plain == "unpriceable_loss":
         note = r.note or ""
-        if note in ("no pool", "no call-hour candle", "no call-minute candle") \
+        if note in ("no pool", "no call-hour candle", "no call-minute candle",
+                    "orientation ambiguous") \
                 or "fetch failed" in note:
             return "waiting"
     return "live"
+
+
+def _refuse_oriented(token_address: str, pool_info: Optional[dict],
+                     call_ts: datetime):
+    """Build the refused verdict for a CONFIRMED flipped pool (pool_guard
+    cascade c): 'unpriceable_loss' with note 'orientation ambiguous' —
+    score_state_7d maps it to 'waiting', so the row stays pending and every
+    rescore pass retries it (GT may add a base-seat pool later; Birdeye got
+    its chance at fetch time). The known-wrong curve is never scored."""
+    from pricing.strategy7d import Eval7dResult
+    end = call_ts + timedelta(days=settings.eval_days)
+    return Eval7dResult(
+        status_plain="unpriceable_loss", status_stoploss="unpriceable_loss",
+        api_requests_used=0, evaluation_end_timestamp=end,
+        pool_address=(pool_info or {}).get("pool_address"),
+        note="orientation ambiguous", window_complete=False)
 
 
 def mark_waiting_7d(call_id: int) -> None:
@@ -1127,20 +1144,97 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
     fetch_hourly, fetch_minute = make_cached_fetchers(
         get_connection(), _get_v2_client(chain)
     )
-    r = evaluate_call_7d(
-        pool_info["pool_address"] if pool_info else None,
-        token_address, call_ts, fetch_hourly, fetch_minute,
-        eval_days=settings.eval_days,
-        entry_grace_minutes=settings.entry_grace_minutes,
-        now=now,
-    )
+
+    # ---- pool-orientation guard (museic/DRUGS lesson, 2026-09-23) ----------
+    # GT's OHLCV tracks the pool's BASE seat; if the called token sits in the
+    # QUOTE seat we'd score the *other* asset's curve (museic was priced on
+    # META's $750 stock curve and printed a false loss). Two FREE tripwires
+    # over data already in hand (exotic quote symbol / curve-vs-quote
+    # magnitude); only when one fires do we spend ONE GT listing call, whose
+    # verdict caches forever in token_meta.pool_is_base. Cascade on a
+    # confirmed flip: (a) healthy base-seat GT pool -> same engine on it;
+    # (b) none -> Birdeye (address-keyed, seat-immune; fetch-time only);
+    # (c) neither -> refuse (pending, note 'orientation ambiguous') — never
+    # score a known-wrong curve. POOL_GUARD=false opts out. pool_guard.py.
+    guard_active = (pool_info is not None and settings.pool_guard
+                    and settings.pricing_engine == "7d")
+    guard = None                                   # None | 'flipped'
+    if guard_active and pool_info:
+        from pricing import pool_guard
+        ext = _DS_CHAIN.get(chain, chain)
+        seat = pool_info.get("pool_is_base")       # None | 0 | 1
+        if seat == 0:
+            guard = "flipped"                      # cached verdict: don't score
+        elif seat is None and pool_guard.is_exotic_quote(
+                ext, pool_info.get("quote_symbol")):
+            is_base, cands = pool_guard.confirm_seats(
+                _get_v2_client(chain), token_address, pool_info["pool_address"])
+            # is_base None = listing failed -> fail open (old behavior,
+            # magnitude tripwire still applies post-score)
+            if is_base is not None:
+                if is_base:
+                    pool_info = {**pool_info, "pool_is_base": 1}
+                    upsert_token_meta(pool_info, chain=chain)
+                elif cands:
+                    base = cands[0]                # (a) re-seat, highest reserve
+                    pool_info = {**pool_info,
+                                 "pool_address": base["pool_address"],
+                                 "liquidity_usd": base["reserve_usd"],
+                                 "pool_is_base": 1}
+                    upsert_token_meta(pool_info, chain=chain)
+                    log.info("pool_guard: %s re-seated to base pool %s (%s, $%s reserve)",
+                             token_address[:10], base["pool_address"][:14],
+                             base["name"], int(base["reserve_usd"]))
+                else:
+                    pool_info = {**pool_info, "pool_is_base": 0}
+                    upsert_token_meta(pool_info, chain=chain)
+                    guard = "flipped"              # (b)/(c) below
+
+    if guard == "flipped":
+        r = _refuse_oriented(token_address, pool_info, call_ts)
+    else:
+        r = evaluate_call_7d(
+            pool_info["pool_address"] if pool_info else None,
+            token_address, call_ts, fetch_hourly, fetch_minute,
+            eval_days=settings.eval_days,
+            entry_grace_minutes=settings.entry_grace_minutes,
+            now=now,
+        )
+    r.pool_price_usd = float((pool_info or {}).get("price_usd") or 0) or None
     if pool_info:
         # Carry the resolved identity onto the verdict so apply_eval7d can
         # fill calls.token_symbol/token_name — every priced call shows its
         # real ticker (user report: deep-dive was all bare addresses).
         r.token_symbol = r.token_symbol or pool_info.get("symbol")
         r.token_name = r.token_name or pool_info.get("name")
-    if r.status_plain == "unpriceable_loss" and allow_birdeye:
+
+    # magnitude tripwire post-score, for pools the seat listing never
+    # confirmed (call failed, or quote looked safe): a YOUNG/LIVE window's
+    # curve must sit near the token's own fresh DexScreener quote — both
+    # describe "now", so a >20x divergence IS the flip evidence, no listing
+    # needed. Months-old backfill windows are exempt (legit drift); they can
+    # only ever be caught by the exotic-quote tripwire anyway.
+    if (guard_active and pool_info and guard is None and not r.window_complete
+            and pool_info.get("pool_is_base") is None
+            and r.status_plain != "unpriceable_loss"):
+        from pricing import pool_guard
+        if pool_guard.magnitude_suspect(
+                r.final_close_usd or r.max_price_usd, r.pool_price_usd, None):
+            pool_info = {**pool_info, "pool_is_base": 0}
+            upsert_token_meta(pool_info, chain=chain)
+            r = _refuse_oriented(token_address, pool_info, call_ts)
+
+    if r.note == "orientation ambiguous":
+        # (b) last resort before refusing: Birdeye, address-keyed — allowed
+        # only when the caller says so (initial fetch), per standing policy.
+        if allow_birdeye:
+            from pricing.birdeye_rescue import try_rescue
+            rr = try_rescue(token_address, chain, call_ts, now=now)
+            if rr is not None:
+                r = rr
+            # else: (c) stays refused — open window retried each pass
+    if r.status_plain == "unpriceable_loss" and allow_birdeye \
+            and r.note != "orientation ambiguous":
         # Second opinion before condemning: the 2026-09 DB-wide sweep proved
         # 195/255 'unpriceable' rows had complete history on Birdeye (wrong
         # chain tag / aggregator blind spot). Cross-chain probe is address-

@@ -59,6 +59,14 @@ class Settings:
         default_factory=lambda: os.getenv("BIRDEYE_RESCUE", "true").strip().lower()
         not in ("0", "false", "no", "off"))
 
+    # Pool-orientation guard (museic/DRUGS lesson, 2026-09-23): refuse to
+    # score a call off a curve that belongs to the pool's OTHER seat.
+    # Tripwires are free (data already fetched); one cached GT listing call
+    # confirms suspicion. See pricing/pool_guard.py.
+    pool_guard: bool = field(
+        default_factory=lambda: os.getenv("POOL_GUARD", "true").strip().lower()
+        not in ("0", "false", "no", "off"))
+
     # Rate limits (requests per minute). Empirically (2026-08) GeckoTerminal's
     # "Cloudflare protection" is a rolling-window origin limiter that trips at
     # ~23 effective RPM — ABOVE the ~20 advertised. The sustained target is

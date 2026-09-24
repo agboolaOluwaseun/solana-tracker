@@ -130,6 +130,10 @@ class DexScreenerClient:
             "liquidity_usd": (best.get("liquidity") or {}).get("usd") or 0,
             "symbol": base.get("symbol"),
             "name": base.get("name"),
+            # orientation-guard inputs (pool_guard): the paired side's ticker
+            # and the token's own quoted USD price, both free in this response
+            "quote_symbol": (best.get("quoteToken") or {}).get("symbol"),
+            "price_usd": best.get("priceUsd"),
         }
 
     def resolve_by_pool(self, pair_address: str, chain: str = "solana") -> Optional[dict]:
@@ -177,4 +181,6 @@ class DexScreenerClient:
             "liquidity_usd": (best.get("liquidity") or {}).get("usd") or 0,
             "symbol": base.get("symbol"),
             "name": base.get("name"),
+            "quote_symbol": (best.get("quoteToken") or {}).get("symbol"),
+            "price_usd": best.get("priceUsd"),
         }

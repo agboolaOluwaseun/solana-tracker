@@ -41,16 +41,23 @@ def _token_meta_has_chain(conn) -> bool:
 def upsert_token_meta(meta: dict, chain: str = "sol") -> None:
     """Store/refresh a token's pool meta. `chain` is 'sol' or 'robinhood'
     (unified kolfi.db PK is (chain, address); legacy schema keeps its
-    single-address PK — base58 and 0x namespaces can't collide)."""
+    single-address PK — base58 and 0x namespaces can't collide).
+    quote_symbol / pool_is_base carry the pool-orientation guard state
+    (pricing/pool_guard.py); pool_is_base is only overwritten when the
+    caller supplies it, so a cached seat verdict survives re-resolves."""
     with transaction() as conn:
         if _token_meta_has_chain(conn):
             conn.execute(
                 """
-                INSERT INTO token_meta (chain, address, symbol, name, dex_pool_id, liquidity_usd)
-                VALUES (:chain, :address, :symbol, :name, :dex_pool_id, :liquidity_usd)
+                INSERT INTO token_meta (chain, address, symbol, name, dex_pool_id,
+                                        liquidity_usd, quote_symbol, pool_is_base)
+                VALUES (:chain, :address, :symbol, :name, :dex_pool_id, :liquidity_usd,
+                        :quote_symbol, :pool_is_base)
                 ON CONFLICT(chain, address) DO UPDATE SET
                     symbol=excluded.symbol, name=excluded.name,
-                    dex_pool_id=excluded.dex_pool_id, liquidity_usd=excluded.liquidity_usd
+                    dex_pool_id=excluded.dex_pool_id, liquidity_usd=excluded.liquidity_usd,
+                    quote_symbol=excluded.quote_symbol,
+                    pool_is_base=COALESCE(excluded.pool_is_base, token_meta.pool_is_base)
                 """,
                 {
                     "chain": chain,
@@ -59,6 +66,8 @@ def upsert_token_meta(meta: dict, chain: str = "sol") -> None:
                     "name": meta.get("name"),
                     "dex_pool_id": meta.get("pool_address"),
                     "liquidity_usd": meta.get("liquidity_usd"),
+                    "quote_symbol": meta.get("quote_symbol"),
+                    "pool_is_base": meta.get("pool_is_base"),
                 },
             )
         else:
@@ -84,8 +93,8 @@ def get_cached_pool(token_address: str, chain: str = "sol") -> Optional[dict]:
     conn = __import__("db").get_connection()
     if _token_meta_has_chain(conn):
         row = conn.execute(
-            "SELECT dex_pool_id, symbol, name, liquidity_usd FROM token_meta "
-            "WHERE address = ? AND chain = ?",
+            "SELECT dex_pool_id, symbol, name, liquidity_usd, quote_symbol, pool_is_base "
+            "FROM token_meta WHERE address = ? AND chain = ?",
             (token_address, chain),
         ).fetchone()
     else:
@@ -106,6 +115,8 @@ def get_cached_pool(token_address: str, chain: str = "sol") -> Optional[dict]:
             "symbol": row["symbol"],
             "name": row["name"],
             "liquidity_usd": row["liquidity_usd"],
+            "quote_symbol": row["quote_symbol"] if "quote_symbol" in row.keys() else None,
+            "pool_is_base": row["pool_is_base"] if "pool_is_base" in row.keys() else None,
         }
     return None
 
