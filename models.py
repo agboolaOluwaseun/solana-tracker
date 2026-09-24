@@ -68,10 +68,12 @@ class StoplossResult:
     hit_stoploss: bool                      # True if price dropped 50% before hitting 2x
     stoploss_timestamp: Optional[datetime]  # When the 50% drop occurred
     is_win: bool                            # True if hit 2x before 50% drop
-    status: str                             # win|loss|unpriceable_loss
+    status: str                             # win|loss|unpriceable_loss|expired|pending
     pool_address: Optional[str] = None
     candles_used: int = 0
     error: Optional[str] = None
+    final_close_usd: Optional[float] = None     # last close in window (expired mark-to-market)
+    final_close_ts: Optional[datetime] = None
 
 
 @dataclass

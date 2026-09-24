@@ -45,25 +45,24 @@ def _months_ago(now: datetime, months: int) -> datetime:
     return datetime(y, m, now.day, now.hour, now.minute, now.second)
 
 
-def _strategy_join(strategy: str) -> str:
+def _strategy_join(strategy: str, statuses: tuple = ("win", "loss")) -> str:
     """SQL join + status filter for a strategy.
 
-    Denominator = decided calls only (win + loss). Unpriceable AND pending
-    (incl. immature) are excluded from every metric.
+    WIN-RATE population = triggered verdicts only: ('win','loss'). For
+    DISPLAY counts ('calls' on cards/leaderboards) pass statuses including
+    'expired' — user rule 2026-09: window expiry is NOT a verdict for the
+    stop strategies, but expired calls stay visible (gray tiles), they
+    simply never enter the win-rate numerator or denominator.
+    Unpriceable AND pending are excluded from every metric.
     'trailing' (strategy 3, 50% trailing stop) shares the 'sr' alias with
     stoploss so every downstream sr.<col> reference works unchanged —
     trailing_results carries the same is_win/status/peak_profit_pct columns.
     """
-    if strategy == "stoploss":
-        return (
-            "JOIN stoploss_results sr ON sr.call_id = cal.id "
-            "AND sr.status IN ('win','loss')"
-        )
-    if strategy == "trailing":
-        return (
-            "JOIN trailing_results sr ON sr.call_id = cal.id "
-            "AND sr.status IN ('win','loss')"
-        )
+    if strategy in ("stoploss", "trailing"):
+        tbl = "stoploss_results" if strategy == "stoploss" else "trailing_results"
+        marks = ",".join(f"'{s}'" for s in statuses)
+        return (f"JOIN {tbl} sr ON sr.call_id = cal.id "
+                f"AND sr.status IN ({marks})")
     return "AND cal.status IN ('win','loss')"
 
 
@@ -86,10 +85,15 @@ def channel_stats_window(channel_id: int, window: str, strategy: str,
     win_col = _win_col(strategy)
     chain_sql, chain_params = _chain_clause(chain)
     if strategy in ("stoploss", "trailing"):
+        # total_calls shows EVERY visible row under the strategy (expired
+        # included — user rule: don't hide them, they just don't decide
+        # anything); win_rate divides by triggered verdicts only.
         q = f"""
             SELECT COUNT(sr.id) AS total_calls, SUM(sr.is_win) AS wins,
-                   AVG(sr.peak_profit_pct) AS avg_peak_profit_pct
-            FROM calls cal {_strategy_join(strategy)}
+                   SUM(sr.status = 'expired') AS expired,
+                   AVG(CASE WHEN sr.status IN ('win','loss')
+                            THEN sr.peak_profit_pct END) AS avg_peak_profit_pct
+            FROM calls cal {_strategy_join(strategy, ("win", "loss", "expired"))}
             WHERE cal.channel_id = ?{chain_sql}
         """
     else:
@@ -106,10 +110,13 @@ def channel_stats_window(channel_id: int, window: str, strategy: str,
     row = conn.execute(q, params).fetchone()
     total = row["total_calls"] or 0
     wins = row["wins"] or 0
+    expired = row["expired"] or 0 if "expired" in row.keys() else 0
+    decided = total - expired      # win_rate denominator (user rule 2026-09)
     return {
         "total_calls": total,
         "wins": wins,
-        "win_rate": (wins / total * 100.0) if total else None,
+        "expired": expired,
+        "win_rate": (wins / decided * 100.0) if decided else None,
         "avg_peak_profit_pct": row["avg_peak_profit_pct"],
     }
 
@@ -139,29 +146,33 @@ def channel_buckets(channel_id: int, window: str, strategy: str,
         params.append(_iso(since))
 
     if strategy in ("stoploss", "trailing"):
-        base = f"FROM calls cal {join} WHERE {where}"
-        sel = f"SELECT cal.call_timestamp AS ts, sr.is_win AS w, sr.peak_profit_pct AS p {base}"
+        base = f"FROM calls cal {_strategy_join(strategy, ('win', 'loss', 'expired'))} WHERE {where}"
+        sel = f"SELECT cal.call_timestamp AS ts, sr.is_win AS w, sr.status AS s {base}"
     else:
         base = f"FROM calls cal WHERE {where} {join}"
-        sel = f"SELECT cal.call_timestamp AS ts, cal.is_win AS w, cal.peak_profit_pct AS p {base}"
+        sel = f"SELECT cal.call_timestamp AS ts, cal.is_win AS w, 'x' AS s {base}"
     rows = conn.execute(sel, params).fetchall()
 
     groups: Dict[str, List[int]] = {}
+    exp_groups: Dict[str, int] = {}
     for r in rows:
         ts = datetime.fromisoformat(r["ts"].replace("Z", ""))
         if fmt is None:  # weekly: ISO week label
             key = f"{ts.isocalendar()[0]}-W{ts.isocalendar()[1]:02d}"
         else:
             key = ts.strftime(fmt)
+        if r["s"] == "expired":
+            exp_groups[key] = exp_groups.get(key, 0) + 1
+            continue
         groups.setdefault(key, []).append(int(r["w"] or 0))
 
     out = []
-    for key in sorted(groups):
-        wins = sum(groups[key])
-        total = len(groups[key])
+    for key in sorted(set(groups) | set(exp_groups)):
+        wins = sum(groups.get(key, []))
+        total = len(groups.get(key, []))
         out.append({
             "bucket": key,
-            "total_calls": total,
+            "total_calls": total + exp_groups.get(key, 0),
             "wins": wins,
             "win_rate": (wins / total * 100.0) if total else None,
         })

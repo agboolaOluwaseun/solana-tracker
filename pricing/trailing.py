@@ -11,8 +11,10 @@ Outcome over the candle window given:
            exit_multiple = floor/entry = (peak at that moment)/2, always
            in [0.5, 1.0): peak < 2x in every stop-out, so the exit is
            below entry — a real loss floored at -50%.
-  LOSS     window ended with no 2x and no stop break ("held to the end"):
-           exit_multiple = last close / entry (hit_trailing_stop=0).
+  EXPIRED  window ended with no 2x and no stop break (user rule 2026-09:
+           expiry is NOT a verdict for stop strategies — undecided; shown
+           gray in the UI with exit_multiple = last close / entry as its
+           mark-to-market record, and excluded from every stat).
 
 SAME-CANDLE RULE (user, inherited): a candle that touches 2x is a WIN no
 matter what its low did (target checked first), mirroring which=same_candle
@@ -160,12 +162,12 @@ def score_candles_trailing(
             candles_used=len(path))
 
     last = path[-1]
-    exit_mult = last.close / entry               # held to the end
+    exit_mult = last.close / entry               # held to the end — UNDECIDED
     return TrailingResult(
         entry_price_usd=entry, peak_multiple=full_peak / entry,
         peak_price_usd=full_peak, peak_timestamp=peak_ts,
         exit_multiple=exit_mult, exit_price_usd=last.close,
         exit_timestamp=last.timestamp,
         loss_pct=(exit_mult - 1.0) * 100.0, hit_trailing_stop=False,
-        is_win=False, status="loss", pool_address=pool_address,
+        is_win=False, status="expired", pool_address=pool_address,
         candles_used=len(path))

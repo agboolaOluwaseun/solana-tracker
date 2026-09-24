@@ -628,8 +628,9 @@ def persist_stoploss_result(call_id: int, sl) -> None:
             """
             INSERT INTO stoploss_results
                 (call_id, entry_price_usd, peak_price_usd, peak_timestamp,
-                 peak_profit_pct, hit_stoploss, stoploss_timestamp, is_win, status, error, computed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                 peak_profit_pct, hit_stoploss, stoploss_timestamp,
+                 final_close_usd, final_close_ts, is_win, status, error, computed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(call_id) DO UPDATE SET
                 entry_price_usd=excluded.entry_price_usd,
                 peak_price_usd=excluded.peak_price_usd,
@@ -637,6 +638,8 @@ def persist_stoploss_result(call_id: int, sl) -> None:
                 peak_profit_pct=excluded.peak_profit_pct,
                 hit_stoploss=excluded.hit_stoploss,
                 stoploss_timestamp=excluded.stoploss_timestamp,
+                final_close_usd=excluded.final_close_usd,
+                final_close_ts=excluded.final_close_ts,
                 is_win=excluded.is_win,
                 status=excluded.status,
                 error=excluded.error,
@@ -650,6 +653,8 @@ def persist_stoploss_result(call_id: int, sl) -> None:
                 sl.peak_profit_pct,
                 1 if sl.hit_stoploss else 0,
                 _iso(sl.stoploss_timestamp) if sl.stoploss_timestamp else None,
+                getattr(sl, "final_close_usd", None),
+                _iso(sl.final_close_ts) if getattr(sl, "final_close_ts", None) else None,
                 1 if sl.is_win else 0,
                 sl.status,
                 sl.error,
@@ -776,12 +781,11 @@ def score_trailing_call(call_id: int) -> Optional[str]:
     if tr.status == "unpriceable_loss":
         return None
     # OPEN-WINDOW RULE: a call still inside its 7d window (score_state
-    # 'live') whose trailing stop HASN'T triggered is undecided — the
-    # "held to the end" verdict only becomes real at the day-7 cutoff.
-    # Persist it as pending (retry on every rescore pass) unless the stop
-    # itself already fired (a triggered stop-out is final regardless).
+    # 'live') has no expiry yet — 'expired' only becomes real at the day-7
+    # cutoff. While the window is open, an un-triggered trail is 'pending'
+    # (retry next pass). A TRIGGERED stop-out is final regardless of state.
     score_state = row["score_state"] if "score_state" in row.keys() else "final"
-    if score_state == "live" and tr.status == "loss" and not tr.hit_trailing_stop:
+    if score_state == "live" and tr.status == "expired":
         tr.status = "pending"
     persist_trailing_result(call_id, tr)
     return tr.status
@@ -802,7 +806,8 @@ def run_trailing_backfill(progress_cb: ProgressCb = _noop,
                WHERE cal.status IN ('win','loss')
                  AND (tr.id IS NULL
                       OR cal.score_state='live'
-                      OR (cal.score_state='final' AND tr.status NOT IN ('win','loss')))
+                      OR (cal.score_state='final'
+                          AND tr.status NOT IN ('win','loss','expired')))
                ORDER BY cal.id"""
             + (f" LIMIT {int(limit)}" if limit else "")
         ).fetchall()
@@ -924,6 +929,7 @@ def eval7d_to_legacy_pair(r):
         stoploss_timestamp=r.time_minus_50_reached,
         is_win=(r.status_stoploss == "win"), status=r.status_stoploss,
         pool_address=r.pool_address,
+        final_close_usd=r.final_close_usd,
         error=(r.note if r.status_stoploss == "unpriceable_loss" else None),
     )
     return br, sl

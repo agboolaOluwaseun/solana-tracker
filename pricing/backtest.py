@@ -412,17 +412,26 @@ def score_candles_stoploss(
     if hit_win:
         peak, peak_ts = full_max, full_max_ts
         status, is_win, hit_sl, sl_ts = "win", True, False, None
+        final_close = final_close_ts = None
     elif hit_loss:
         peak, peak_ts = max_before_stop, max_before_stop_ts
         status, is_win, hit_sl, sl_ts = "loss", False, True, loss_ts
+        final_close = final_close_ts = None
     else:
-        # Neither hit within the time window -> a loss (didn't reach 2x).
+        # Neither 2x nor the stop triggered within the window. For the STOP
+        # strategy the window end is only an observation horizon (user rule
+        # 2026-09): 'expired' = undecided, excluded from every stat but
+        # shown gray with its last mark. (Normal still calls no-2x a loss.)
         peak, peak_ts = full_max, full_max_ts
-        status, is_win, hit_sl, sl_ts = "loss", False, False, None
+        status, is_win, hit_sl, sl_ts = "expired", False, False, None
+        held = [c for c in sorted_candles if c.timestamp >= call_ts]
+        if held:
+            final_close, final_close_ts = held[-1].close, held[-1].timestamp
 
     return StoplossResult(
         entry_price_usd=entry_price, peak_price_usd=peak, peak_timestamp=peak_ts,
         peak_profit_pct=(peak / entry_price - 1.0) * 100.0,
         hit_stoploss=hit_sl, stoploss_timestamp=sl_ts, is_win=is_win,
         status=status, pool_address=pool_address, candles_used=len(sorted_candles),
+        final_close_usd=final_close, final_close_ts=final_close_ts,
     )

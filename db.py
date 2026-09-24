@@ -65,6 +65,13 @@ def init_db() -> None:
         # Live rescoring: 'live' = provisional verdict inside the open 7d
         # window (rescored every pass), 'final' = window elapsed or legacy.
         conn.execute("ALTER TABLE calls ADD COLUMN score_state TEXT NOT NULL DEFAULT 'final'")
+    # Guarded migration for the 'expired' convention (user rule 2026-09):
+    # the stop strategies record their mark-to-market so gray tiles can show
+    # "out @ X" without re-walking candles.
+    sl_cols = {r["name"] for r in conn.execute("PRAGMA table_info(stoploss_results)").fetchall()}
+    if sl_cols and "final_close_usd" not in sl_cols:
+        conn.execute("ALTER TABLE stoploss_results ADD COLUMN final_close_usd REAL")
+        conn.execute("ALTER TABLE stoploss_results ADD COLUMN final_close_ts TEXT")
     # Scan checkpoint on channels (opportunistic refresh anchor). Seeded in
     # the same guarded migration: started_at of the latest completed run is
     # the newest point up to which that run's FETCH phase walked messages

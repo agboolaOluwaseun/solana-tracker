@@ -213,44 +213,68 @@ export default function ChannelDeepdivePage() {
         ))}
       </div>
 
-      {/* Token Cards Grid — the whole tile is tinted green/red by outcome */}
+      {/* Token Cards Grid — tinted green/red by outcome; GRAY for the stop
+          strategies' 'expired' (no trigger before window close = undecided) */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {sortedCalls.map((call) => (
+        {sortedCalls.map((call) => {
+          const expired = call.strategy_status === "expired";
+          return (
           <div
             key={call.id}
             className={`rounded-xl border p-4 transition-colors ${
-              call.is_win
+              expired
+                ? "border-[var(--border-subtle)] bg-[var(--bg-card)]"
+                : call.is_win
                 ? "border-emerald-500/40 bg-emerald-500/[0.08] hover:border-emerald-500/60"
                 : "border-red-500/40 bg-red-500/[0.08] hover:border-red-500/60"
             }`}
           >
             <div className="mb-3 flex items-start justify-between">
-              <div>
-                <h3 className="font-semibold text-[var(--text-primary)]">
-                  {call.token_symbol || call.token_name || call.token_address.slice(0, 8)}
+              <div className="min-w-0">
+                <h3 className="flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
+                  <span className="truncate">
+                    {call.token_symbol || call.token_name || call.token_address.slice(0, 8)}
+                  </span>
+                  {/* Tiny chain chip — only when the page spans multiple chains */}
+                  {deepDiveChain === "all" && call.chain && (
+                    <span className="shrink-0 rounded border border-[var(--border-subtle)] px-1 py-px text-[9px] font-bold uppercase leading-none text-[var(--text-muted)]">
+                      {{ sol: "SOL", robinhood: "RH", eth: "ETH", bsc: "BSC", base: "BASE", arc: "ARC" }[call.chain] ?? call.chain}
+                    </span>
+                  )}
                 </h3>
               </div>
-              <span className="text-lg font-bold text-[var(--accent-gold)]">
+              <span className={`text-lg font-bold ${expired ? "text-[var(--text-muted)]" : "text-[var(--accent-gold)]"}`}>
                 {call.multiplier != null ? formatMultiplier(call.multiplier) : "—"}
               </span>
             </div>
             <div className="space-y-1 text-xs text-[var(--text-secondary)]">
               <p>
-                <span className={call.is_win ? "font-bold text-emerald-400" : "font-bold text-red-400"}>
-                  {call.is_win ? "WIN" : "LOSS"}
+                <span className={
+                  expired
+                    ? "font-bold text-[var(--text-muted)]"
+                    : call.is_win ? "font-bold text-emerald-400" : "font-bold text-red-400"
+                }>
+                  {expired ? "EXPIRED" : call.is_win ? "WIN" : "LOSS"}
                 </span>
-                {" · "}
-                {call.peak_profit_pct != null ? `${call.peak_profit_pct.toFixed(0)}%` : "—"}
+                {!expired && (
+                  <>
+                    {" · "}
+                    {call.peak_profit_pct != null ? `${call.peak_profit_pct.toFixed(0)}%` : "—"}
+                  </>
+                )}
               </p>
-              {/* Trailing stop-out detail: how deep the ride fell before the
-                  trailing floor caught it. 0.9x exit = LOSS -10% (capital
-                  returned is 90 cents per dollar — the pump was unrealized
-                  and given back). */}
-              {strategy === "trail" && !call.is_win && call.exit_multiple != null && (
+              {/* Stop-strategy detail line: for a trailing stop-out or an
+                  expired tile, the mark-to-market exit x (+ P&L for trail).
+                  exit_multiple is the FRACTION OF CAPITAL RETURNED —
+                  0.9x out = LOSS -10%. */}
+              {(call.strategy_status === "expired" ||
+                (strategy === "trail" && !call.is_win && call.exit_multiple != null)) &&
+                call.exit_multiple != null && (
                 <p className="text-[var(--text-muted)]">
-                  out @ {call.exit_multiple.toFixed(2)}x
+                  {call.strategy_status === "expired" ? "no trigger · out @ " : "out @ "}
+                  {call.exit_multiple.toFixed(2)}x
                   {call.loss_pct != null ? ` · ${call.loss_pct.toFixed(0)}%` : ""}
-                  {call.trailing_peak_multiple != null
+                  {call.trailing_peak_multiple != null && call.strategy_status !== "expired"
                     ? ` (peak ${call.trailing_peak_multiple.toFixed(1)}x)`
                     : ""}
                 </p>
@@ -258,7 +282,8 @@ export default function ChannelDeepdivePage() {
               <p className="text-[var(--text-muted)]">{new Date(call.call_timestamp).toLocaleDateString()}</p>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -63,9 +63,12 @@ export interface ApiCall {
   is_win: number;
   status: string;
   multiplier: number | null;
-  // Trailing-strategy overlay (only present when ?strategy=trailing):
-  // a stop-out records exit_multiple = peak/2 (the x of capital returned)
-  // and loss_pct = (exit_multiple - 1) * 100.
+  // Per-call chain (deep-dive 'all' mode shows a tiny badge with it).
+  chain?: string | null;
+  // Strategy overlay fields (present when strategy=stoploss|trailing):
+  // 'expired' = window closed with no trigger -> gray tile, excluded from
+  // the win rate. exit_multiple = mark-to-market (trail: the stop-out x).
+  strategy_status?: "win" | "loss" | "expired" | null;
   trailing_peak_multiple?: number | null;
   exit_multiple?: number | null;
   exit_timestamp?: string | null;

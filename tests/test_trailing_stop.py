@@ -122,6 +122,17 @@ def test_no_candles_is_unpriceable_not_loss():
     assert r.status == "unpriceable_loss" and r.error == "no candles provided"
 
 
+def test_window_end_without_trigger_is_expired_not_loss():
+    # user rule 2026-09: expiry is NOT a verdict for stop strategies.
+    # Flat grind that never reaches 2x and never breaks the rising floor.
+    bars = [bar(i, 1.0, 1.05, 0.98, 1.02) for i in range(10)]
+    bars += [bar(10 + i, 1.02, 1.04, 1.0, 1.01) for i in range(10)]
+    r = score_candles_trailing(bars, T0)
+    assert r.status == "expired" and not r.hit_trailing_stop and not r.is_win
+    # the gray tile still shows its last mark-to-market
+    assert r.exit_multiple is not None and abs(r.exit_multiple - 1.01) < 1e-9
+
+
 def test_wick_clip_defends_a_CALI_style_artifact():
     # entry 1.0; real trade flat ~1.1; ONE minute prints 50x then vanishes.
     # Without clipping it would fake a peak (floor 25x) — but it would also

@@ -283,21 +283,26 @@ def channel_calls(request):
     # overlay has no result for keep their plain verdict (best-effort, the
     # header/tiers denominator already excludes them).
     overlay: dict = {}
-    if strategy in ("stoploss", "trailing") and _unified():
+    if strategy in ("stoploss", "trailing"):
         tbl = "stoploss_results" if strategy == "stoploss" else "trailing_results"
-        cols = ("sr.peak_profit_pct, sr.is_win, NULL AS exit_multiple, "
-                "NULL AS exit_timestamp, NULL AS trailing_peak_multiple, NULL AS trailing_peak_timestamp, "
-                "NULL AS loss_pct"
-                if strategy == "stoploss" else
-                "(sr.peak_multiple - 1) * 100 AS peak_profit_pct, sr.is_win, "
-                "sr.exit_multiple, sr.exit_timestamp, "
-                "sr.peak_multiple AS trailing_peak_multiple, "
-                "sr.peak_timestamp AS trailing_peak_timestamp, "
-                "sr.loss_pct")
+        if strategy == "stoploss":
+            cols = ("sr.peak_profit_pct, sr.is_win, sr.status AS strategy_status, "
+                    "sr.final_close_usd / NULLIF(sr.entry_price_usd, 0) AS exit_multiple, "
+                    "COALESCE(sr.stoploss_timestamp, sr.final_close_ts) AS exit_timestamp, "
+                    "NULL AS trailing_peak_multiple, NULL AS trailing_peak_timestamp, "
+                    "NULL AS loss_pct")
+        else:
+            cols = ("(sr.peak_multiple - 1) * 100 AS peak_profit_pct, sr.is_win, "
+                    "sr.status AS strategy_status, "
+                    "sr.exit_multiple, sr.exit_timestamp, "
+                    "sr.peak_multiple AS trailing_peak_multiple, "
+                    "sr.peak_timestamp AS trailing_peak_timestamp, "
+                    "sr.loss_pct")
         orow = conn.execute(f"""
             SELECT cal.id, {cols}
             FROM calls cal JOIN {tbl} sr ON sr.call_id = cal.id
-            WHERE cal.channel_id = ? AND sr.status IN ('win','loss')
+            WHERE cal.channel_id = ?
+              AND sr.status IN ('win','loss','expired')
         """, (row["id"],)).fetchall()
         overlay = {o["id"]: o for o in orow}
     out = []
@@ -317,11 +322,14 @@ def channel_calls(request):
         if ov is not None:
             d["is_win"] = ov["is_win"]
             d["peak_profit_pct"] = ov["peak_profit_pct"]
+            # 'expired' = the strategy never triggered before window close:
+            # gray tile, no verdict, excluded from stats (user rule 2026-09).
+            d["strategy_status"] = ov["strategy_status"]
+            d["exit_multiple"] = ov["exit_multiple"]
+            d["exit_timestamp"] = ov["exit_timestamp"]
             if strategy == "trailing":
                 d["trailing_peak_multiple"] = ov["trailing_peak_multiple"]
                 d["trailing_peak_timestamp"] = ov["trailing_peak_timestamp"]
-                d["exit_multiple"] = ov["exit_multiple"]
-                d["exit_timestamp"] = ov["exit_timestamp"]
                 d["loss_pct"] = ov["loss_pct"]
         out.append(d)
     return _j(out)

@@ -52,7 +52,8 @@ from models import PricePoint
 @dataclass
 class Eval7dResult:
     status_plain: str                 # 'win' | 'loss' | 'unpriceable_loss'
-    status_stoploss: str              # same enum
+    status_stoploss: str              # 'win'|'loss'|'unpriceable_loss'|'expired'|'pending'
+    final_close_usd: Optional[float] = None   # last close in window — the mark-to-market for 'expired'
     screening_entry_usd: Optional[float] = None
     screening_target_usd: Optional[float] = None
     entry_price_usd: Optional[float] = None
@@ -183,14 +184,34 @@ def evaluate_call_7d(
     )
 
     if max_hourly_high < screening_target:
-        # Final only when the 7d window actually elapsed; live mode cannot
-        # conclude a definite loss from an incomplete window.
+        # Plain (normal) strategy: no 2x in window -> loss (expiry IS the
+        # verdict for Normal; unchanged).
+        # Stop-loss strategy (user rule 2026-09): the strategy only DECIDES
+        # when the -50% stop triggers. The screening shortcut skips minute
+        # resolution, so test the stop against the hourly lows using the
+        # call-hour OPEN as entry approximation: a clean break => loss;
+        # otherwise window-closed = 'expired' (undecided, grayed in UI),
+        # window-open = 'pending' (rescored next pass).
+        hour_open = call_hour_candle.open or screening_entry
+        stop_broken = hour_open > 0 and any(
+            c.low <= hour_open * 0.5 for c in hourly
+            if hour_start <= c.timestamp < window_end)
+        last_close = next((c.close for c in reversed(hourly)
+                           if hour_start <= c.timestamp < window_end), None)
         return Eval7dResult(
-            status_plain="loss", status_stoploss="loss",
+            status_plain="loss",
+            status_stoploss="loss" if stop_broken else
+                            ("expired" if not live else "pending"),
             screening_entry_usd=screening_entry, screening_target_usd=screening_target,
+            entry_price_usd=hour_open,
+            max_price_usd=max_hourly_high or None,
+            max_multiple=(max_hourly_high / hour_open) if hour_open else None,
+            final_close_usd=last_close,
             which_threshold_first="none", api_requests_used=reqs,
             evaluation_end_timestamp=end7, pool_address=pool_address,
-            note="screening LOSS" if not live else "provisional loss (window open)",
+            note="screening LOSS" if not stop_broken and not live else
+                 ("screening stop-out" if stop_broken else
+                  "provisional loss (window open)"),
             window_complete=not live,
         )
 
@@ -272,14 +293,22 @@ def evaluate_call_7d(
         stoploss = "win"                      # user rule
     elif which_first == "2x":
         stoploss = "win"
+    elif which_first == "none":
+        # Neither 2x nor the -50% stop triggered. For the stop strategy the
+        # window end is only an observation horizon, not a verdict (user
+        # rule 2026-09): closed window -> 'expired' (undecided, gray in UI,
+        # excluded from every stat), open window -> 'pending' (retry).
+        stoploss = "expired" if not live else "pending"
     else:
         stoploss = "loss"
 
     max_price = max((c.high for c in path), default=entry)
     min_price = min((c.low for c in path), default=entry)
+    last_close = path[-1].close if path else None
 
     return Eval7dResult(
         status_plain=plain, status_stoploss=stoploss,
+        final_close_usd=last_close,
         screening_entry_usd=screening_entry, screening_target_usd=screening_target,
         entry_price_usd=entry, target_usd=target,
         max_price_usd=max_price, min_price_usd=min_price,

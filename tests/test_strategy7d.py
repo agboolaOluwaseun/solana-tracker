@@ -70,7 +70,11 @@ def test_screening_loss_one_request():
         hourly(HOUR_END + timedelta(hours=1), 1.7, 1.1),
     ]
     r = evaluate(hours, [])
-    assert r.status_plain == "loss" and r.status_stoploss == "loss"
+    assert r.status_plain == "loss"
+    # user rule 2026-09: the -50% stop never broke (lows >= 1.0 > 0.5 floor)
+    # -> the STOP strategy has no verdict at all: 'expired' (undecided, gray).
+    assert r.status_stoploss == "expired"
+    assert r.final_close_usd == 1.1        # mark-to-market for the tile
     assert r.api_requests_used == 1
     assert r.granular_analysis_required is False
     assert r.note == "screening LOSS"
@@ -230,7 +234,9 @@ def test_pre_call_spike_ignored():
         hourly(HOUR_END + timedelta(hours=1), 1.6, 1.1),
     ]
     r = evaluate(hours, [], leak_hourly_before=True)
-    assert r.status_plain == "loss" and r.status_stoploss == "loss"
+    # pre-call spike ignored; nothing in-window breaks the 0.5 floor either
+    # -> plain loss, stop strategy expired (user rule 2026-09).
+    assert r.status_plain == "loss" and r.status_stoploss == "expired"
     assert r.note == "screening LOSS"
     assert r.api_requests_used == 1
 
@@ -246,7 +252,10 @@ def test_neither_threshold():
     ]
     mins = [pp(CALL_TS.replace(second=0), 1.3, 1.4, 1.25)]   # entry 1.3 -> target 2.6, stop 0.65
     r = evaluate(hours, mins)
-    assert r.status_plain == "loss" and r.status_stoploss == "loss"
+    # neither 2x nor the 0.65 stop printed -> plain loss; stop strategy
+    # EXPIRED (user rule 2026-09), marked at its final close 0.75 (0.58x).
+    assert r.status_plain == "loss" and r.status_stoploss == "expired"
+    assert r.final_close_usd == 0.75
     assert r.which_threshold_first == "none"
     assert r.target_2x_reached is False and r.minus_50_reached is False
     assert r.api_requests_used == 2

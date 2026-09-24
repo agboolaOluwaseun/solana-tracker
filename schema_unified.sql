@@ -129,8 +129,10 @@ CREATE TABLE IF NOT EXISTS stoploss_results (
     peak_profit_pct   REAL,
     hit_stoploss      INTEGER NOT NULL DEFAULT 0,
     stoploss_timestamp TEXT,
+    final_close_usd   REAL,           -- mark-to-market for 'expired' (window
+    final_close_ts    TEXT,           -- ended, stop never triggered)
     is_win            INTEGER NOT NULL DEFAULT 0,
-    status            TEXT NOT NULL DEFAULT 'pending',
+    status            TEXT NOT NULL DEFAULT 'pending',   -- win|loss|unpriceable_loss|expired|pending
     error             TEXT,
     computed_at       TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(call_id)
@@ -141,10 +143,11 @@ CREATE INDEX IF NOT EXISTS idx_sl_status ON stoploss_results(status);
 -- falls). WIN = 2x entry reached before the trailing stop triggered; LOSS =
 -- a candle low reached half the running peak first. exit_multiple = the
 -- FRACTION OF CAPITAL RETURNED at the stop-out (peak/2; for STOP-OUT losses
--- always 0.5..1.0 since peak<2x — a guaranteed loss floored at 50%; held-
--- to-end losses record the final close, hit_trailing_stop=0, which may be
--- >=1.0 — the strategy still says "didn't reach 2x"). loss_pct =
--- (exit_multiple-1)*100 -> e.g. peak 1.8x, out 0.9x = -10%.
+-- always 0.5..1.0 since peak<2x — a guaranteed loss floored at 50%). 'expired'
+-- (hit_trailing_stop=0) = window closed with no trigger: NOT a verdict,
+-- excluded from every stat; exit_multiple/loss_pct record the final close as
+-- mark-to-market for the gray tile. loss_pct = (exit_multiple-1)*100 -> e.g.
+-- peak 1.8x, out 0.9x = -10%.
 CREATE TABLE IF NOT EXISTS trailing_results (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     call_id           INTEGER NOT NULL REFERENCES calls(id),
@@ -159,7 +162,7 @@ CREATE TABLE IF NOT EXISTS trailing_results (
     loss_pct          REAL,               -- (exit_multiple-1)*100, negative on loss
     hit_trailing_stop INTEGER NOT NULL DEFAULT 0,
     is_win            INTEGER NOT NULL DEFAULT 0,
-    status            TEXT NOT NULL DEFAULT 'pending',   -- win|loss|unpriceable_loss|pending
+    status            TEXT NOT NULL DEFAULT 'pending',   -- win|loss|unpriceable_loss|expired|pending
     error             TEXT,
     computed_at       TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(call_id)
