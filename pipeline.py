@@ -765,10 +765,12 @@ def score_trailing_call(call_id: int) -> Optional[str]:
     from pricing.trailing import score_candles_trailing
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, pool_address, token_address, call_timestamp, score_state"
+            "SELECT id, pool_address, token_address, call_timestamp, score_state, note"
             " FROM calls WHERE id=?", (call_id,)).fetchone()
         if row is None:
             return None
+        if row["note"] and "excluded from SL/trail" in row["note"]:
+            return None   # manual user exclusion (see scripts/manual_win2x_cghub.py)
         candles = _trailing_series(conn, row)
     if not candles:
         return None
@@ -805,6 +807,7 @@ def run_trailing_backfill(progress_cb: ProgressCb = _noop,
             """SELECT cal.id FROM calls cal
                LEFT JOIN trailing_results tr ON tr.call_id = cal.id
                WHERE cal.status IN ('win','loss')
+                 AND COALESCE(cal.note,'') NOT LIKE '%excluded from SL/trail%'
                  AND (tr.id IS NULL
                       OR cal.score_state='live'
                       OR (cal.score_state='final'
