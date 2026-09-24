@@ -17,6 +17,8 @@ export interface SseEvent {
   immature?: number;
   live?: number;
   waiting?: number;
+  /** Unpriceable tokens the Birdeye cross-chain retry managed to price. */
+  birdeye_saved?: number;
   total_calls?: number;
   message?: string;
   channels?: { channel_id: number; title: string; status?: string }[];

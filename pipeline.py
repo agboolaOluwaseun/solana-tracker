@@ -84,6 +84,7 @@ class Progress:
     immature: int = 0    # legacy engine only (7d defers nothing)
     live: int = 0        # 7d: provisional verdicts inside the open window
     waiting: int = 0     # 7d: market data not indexed yet, retry next pass
+    birdeye_saved: int = 0  # unpriceable verdicts rescued by the Birdeye retry
     total_calls: int = 0
     message: str = ""
 
@@ -1379,6 +1380,7 @@ def run_backfill(
     chain_unpriceable = {}  # chain -> count of unpriceable calls
     live = 0
     waiting = 0
+    birdeye_saved = 0  # unpriceable verdicts rescued by the Birdeye retry
     for i, row in enumerate(pending, start=1):
         addr = row["token_address"]
         sym = ""  # we don't have it in the pending row; use the address prefix
@@ -1477,6 +1479,13 @@ def run_backfill(
             progress_cb(progress)
             continue
         if r7 is not None:
+            # Birdeye-retry visibility (user 2026-09-23): a rescued verdict
+            # carries chain_corrected and/or a '(birdeye <chain>)' note set
+            # by pricing/birdeye_rescue.py — count it so the scan narration
+            # and final report show how many GT-blind-spot tokens only the
+            # Birdeye retry could price.
+            if getattr(r7, "chain_corrected", None) or "birdeye" in (r7.note or ""):
+                birdeye_saved += 1
             apply_eval7d(row["id"], r7)
         else:
             apply_backtest(channel_id, row["id"], row["message_id"], result)
@@ -1503,6 +1512,7 @@ def run_backfill(
         progress.unpriceable = unpriceable
         progress.live = live
         progress.waiting = waiting
+        progress.birdeye_saved = birdeye_saved
         progress.scanned = i
         tail = []
         if live:
@@ -1511,6 +1521,8 @@ def run_backfill(
             tail.append(f"{waiting} waiting for data")
         if unpriceable:
             tail.append(f"{unpriceable} not found")
+        if birdeye_saved:
+            tail.append(f"{birdeye_saved} via birdeye")
         if progress.immature:
             tail.append(f"{progress.immature} deferred")
         progress.message = (
@@ -1586,6 +1598,8 @@ def run_backfill(
     tail = []
     if unpriceable:
         tail.append(f"{unpriceable} not found")
+    if birdeye_saved:
+        tail.append(f"{birdeye_saved} rescued via birdeye")
     if live:
         tail.append(f"{live} live (refresh to update)")
     if waiting:

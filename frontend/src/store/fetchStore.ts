@@ -50,6 +50,7 @@ export interface FetchTask {
   unpriceable: number;
   live: number;
   waiting: number;
+  birdeye_saved: number;  // unpriceables rescued via the Birdeye retry
   total_calls: number;
   /** Rolling narration lines — what just happened, real counters only. */
   log: string[];
@@ -104,6 +105,7 @@ function blankTask(it: { channel_id: number; title: string }): FetchTask {
     unpriceable: 0,
     live: 0,
     waiting: 0,
+    birdeye_saved: 0,
     total_calls: 0,
     log: [],
     lastMessage: "",
@@ -250,6 +252,7 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
       if (typeof data.unpriceable === "number") t.unpriceable = data.unpriceable;
       if (typeof data.live === "number") t.live = data.live;
       if (typeof data.waiting === "number") t.waiting = data.waiting;
+      if (typeof data.birdeye_saved === "number") t.birdeye_saved = data.birdeye_saved;
       if (typeof data.total_calls === "number") t.total_calls = data.total_calls;
       if (data.message) {
         t = pushLine(t, data.message);
@@ -263,8 +266,8 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
         (t.total_calls === 0
           ? "up to date"
           : `done — ${t.priced + t.live} priced, ${t.unpriceable} unpriceable${
-              t.waiting ? `, ${t.waiting} waiting` : ""
-            }`);
+              t.birdeye_saved ? `, ${t.birdeye_saved} via birdeye` : ""
+            }${t.waiting ? `, ${t.waiting} waiting` : ""}`);
       t = pushLine({ ...t, status: "done", stage: "done" }, summary);
       if (kind === "refresh") pushFeed(summary);
       break;

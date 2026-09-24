@@ -94,6 +94,12 @@ export default function LoadingCard({ task }: { task: FetchTask }) {
             </span>
           )}
           {task.unpriceable > 0 && <span>{task.unpriceable} unpriceable</span>}
+          {task.birdeye_saved > 0 && (
+            <span className="text-[var(--accent-gold)]"
+              title="GeckoTerminal/DexScreener had no pool for these — the Birdeye cross-chain retry found and priced them">
+              {task.birdeye_saved} via birdeye
+            </span>
+          )}
         </div>
       )}
     </motion.div>
