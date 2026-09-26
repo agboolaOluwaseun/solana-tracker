@@ -1065,6 +1065,17 @@ def apply_eval7d(call_id: int, r) -> None:
                 call_id,
             ),
         )
+    # Embedded trail verdict (Birdeye-rescued calls): their candle series
+    # never lands in price_cache (no honest GT curve exists), so the
+    # cache-only attach refuses forever — write the verdict the rescue
+    # computed ON THE SAME SERIES normal/SL were judged on instead.
+    tv = getattr(r, "trailing_verdict", None)
+    if tv is not None:
+        try:
+            persist_trailing_result(call_id, tv)
+        except Exception:  # noqa: BLE001 — never break the main persist
+            log.exception("embedded trailing persist failed for call %s",
+                          call_id)
 
 
 def score_state_7d(r) -> str:

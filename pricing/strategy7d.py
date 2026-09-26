@@ -83,6 +83,11 @@ class Eval7dResult:
     # chain than the stored tag — apply_eval7d persists it so every later
     # pass resolves the pool on the right chain without needing Birdeye.
     chain_corrected: Optional[str] = None
+    trailing_verdict: Optional[object] = None   # pricing/trailing.TrailingResult
+    # set by the Birdeye rescue when its candle series never lands in
+    # price_cache (rescued calls have no GT-cached curve to re-walk):
+    # persist_stoploss_result prefers this embedded verdict over the
+    # cache-only attach so trail rides the SAME series as normal/SL.
     # LIVE mode (evaluate_call_7d given `now` inside the 7d window):
     # the walk covered [call, now) only. All statuses are then PROVISIONAL:
     # a screening 'loss' may still flip to win (and max_multiple grows) in

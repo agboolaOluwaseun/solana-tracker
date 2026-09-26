@@ -338,3 +338,67 @@ def test_apply_eval7d_adopts_rescued_chain(tmp_path, monkeypatch):
         row = c.execute("SELECT chain, token_symbol FROM calls WHERE id=?", (call_id,)).fetchone()
     assert row["chain"] == "bsc"
     assert row["token_symbol"] == "RESC"
+
+
+def test_apply_eval7d_persists_embedded_trailing_verdict(tmp_path, monkeypatch):
+    """Rescued calls have no GT-cached curve, so the rescue embeds its
+    trail verdict (computed on the SAME Birdeye series as normal/SL) and
+    apply_eval7d must write it to trailing_results."""
+    import dataclasses
+    import db as dbmod
+    import pipeline
+    from pipeline import apply_eval7d, persist_trailing_result
+    from pricing.strategy7d import Eval7dResult
+    from pricing.trailing import TrailingResult
+    from datetime import datetime
+
+    dbfile = tmp_path / "emb.db"
+    new_settings = dataclasses.replace(
+        config.settings, db_path=dbfile, schema_file="schema_unified.sql")
+    monkeypatch.setattr(config, "settings", new_settings)
+    monkeypatch.setattr(pipeline, "settings", new_settings)
+    monkeypatch.setattr(dbmod, "settings", new_settings)
+    old = dbmod._local.__dict__.get("conn")
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+        dbmod._local.__dict__.pop("conn", None)
+    dbmod.init_db()
+    with dbmod.transaction() as conn:
+        conn.execute("INSERT INTO channels (telegram_channel_id, title,"
+                     " window_start, window_end) VALUES (1,'x','2026-01-01',"
+                     "'2026-09-01')")
+        ch = conn.execute("SELECT id FROM channels").fetchone()["id"]
+        conn.execute("INSERT INTO calls (channel_id, message_id, raw_text,"
+                     " token_address, call_timestamp, chain, status, is_win)"
+                     " VALUES (?,1,'t','0xabc','2026-06-01T12:00:00Z',"
+                     "'robinhood','unpriceable_loss',0)", (ch,))
+        cid = conn.execute("SELECT id FROM calls").fetchone()["id"]
+
+    tv = TrailingResult(
+        entry_price_usd=1e-4, peak_multiple=1.8, peak_price_usd=1.8e-4,
+        peak_timestamp=datetime(2026, 6, 2), exit_multiple=0.9,
+        exit_price_usd=9e-5, exit_timestamp=datetime(2026, 6, 3),
+        loss_pct=-10.0, hit_trailing_stop=True, is_win=False,
+        status="loss", pool_address="0xabc")
+    r = Eval7dResult(status_plain="win", status_stoploss="win",
+                     entry_price_usd=1e-4, max_multiple=2.5,
+                     window_complete=True, trailing_verdict=tv)
+    # persist_stoploss's cache-attach finds NO candles (rescued pool) and
+    # must not clobber the embedded verdict: attach returns None -> skipped.
+    pipeline.persist_stoploss_result(cid, r and __import__("pipeline").eval7d_to_legacy_pair(r)[1])
+    apply_eval7d(cid, r)
+    with dbmod.get_connection() as c:
+        row = c.execute("SELECT status, exit_multiple, loss_pct,"
+                        " entry_price_usd FROM trailing_results"
+                        " WHERE call_id=?", (cid,)).fetchone()
+    assert row is not None and row["status"] == "loss"
+    assert row["exit_multiple"] == 0.9 and row["loss_pct"] == -10.0
+    assert row["entry_price_usd"] == 1e-4      # rescue's own entry dollar
+    # cleanup thread-local so next tests rebind cleanly
+    emb = dbmod._local.__dict__.get("conn")
+    if emb is not None:
+        emb.close()
+        dbmod._local.__dict__.pop("conn", None)

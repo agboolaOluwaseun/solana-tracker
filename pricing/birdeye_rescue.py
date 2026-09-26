@@ -266,9 +266,35 @@ def _confirm_on_minutes(addr: str, bc: str, ts: datetime, pool_addr,
                              now=now)
         if r.status_plain == "unpriceable_loss":
             return None
+        # trail rides the wick-CLIPPED minute series that decided this verdict
+        r.trailing_verdict = _trail_from_series(r, clean, ts)
         return r
     except Exception:  # noqa: BLE001
         log.exception("1m confirmation failed for %s", addr[:12] + "…")
+        return None
+
+
+def _trail_from_series(r, series, ts):
+    """Trailing verdict computed on the rescue's OWN candle series (the
+    exact history normal/SL were judged on). Rescued calls have no
+    GT-cached curve — the saved pool address maps to another asset or
+    nothing — so the cache-only attach can never re-walk them honestly;
+    persist_stoploss's normal attach stays refused for them, and
+    apply_eval7d writes this embedded verdict instead. Returns None when
+    the dollar is meaningless (scale dust) or the series too thin."""
+    try:
+        if not series or not r.entry_price_usd or r.entry_price_usd < 1e-15:
+            return None
+        from pricing.trailing import score_candles_trailing
+        tr = score_candles_trailing(series, ts,
+                                    entry_override=r.entry_price_usd,
+                                    pool_address=r.pool_address)
+        if tr.status == "unpriceable_loss":
+            return None
+        if tr.status == "expired" and not r.window_complete:
+            tr.status = "pending"      # open window: expiry isn't real yet
+        return tr
+    except Exception:  # noqa: BLE001 — trail is optional, verdict is not
         return None
 
 
@@ -332,6 +358,16 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
                              now=now)
         if r.status_plain == "unpriceable_loss":
             return None
+        # Trail rides the SAME series the rescue judged normal/SL on: rescued
+        # calls have no GT-cached curve (their saved pool cache belongs to
+        # another asset or does not exist), so the cache-only attach can
+        # never re-walk them honestly — embed the verdict instead. The
+        # series goes through the wick filter (same read-time repair the
+        # engine's fetch_hourly wrapper applies) before the trail walk.
+        _w, _ = fetch_hourly(pool_addr or token_address, token_address,
+                             ts - timedelta(hours=1),
+                             ts + timedelta(days=settings.eval_days + 1))
+        r.trailing_verdict = _trail_from_series(r, _w, ts)
         # Data-quality confirmation (2026-09 lessons): hourly highs can be
         # single-minute WICKS (one trade through a thin pool prints a high
         # thousands of x its own body, rejected next bar — CALI's 12,590x)
