@@ -775,11 +775,19 @@ def _trailing_series(conn, call_row) -> list:
 def score_trailing_call(call_id: int) -> Optional[str]:
     """Compute + persist the trailing verdict for one call from CACHED
     candles only (zero API). Returns the status, or None when no candles
-    are cached yet (call stays untrailing; the next pass retries)."""
+    are cached yet (call stays untrailing; the next pass retries).
+
+    Anchoring (user ratified 2026-09-24): the verdict is measured from the
+    ENGINE's stored entry dollar (calls.entry_price_usd — the call-minute
+    open the normal + fixed-SL verdicts use), not a re-derived hour-open.
+    A stored-vs-curve gap >20x means the cache holds a flipped pool's
+    curve (DRUGS/BIO class): the row is persisted as 'pending' with the
+    mismatch note — visible for audit, never scored on fake candles."""
     from pricing.trailing import score_candles_trailing
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, pool_address, token_address, call_timestamp, score_state, note"
+            "SELECT id, pool_address, token_address, call_timestamp,"
+            " score_state, note, entry_price_usd"
             " FROM calls WHERE id=?", (call_id,)).fetchone()
         if row is None:
             return None
@@ -794,8 +802,25 @@ def score_trailing_call(call_id: int) -> Optional[str]:
     tr = score_candles_trailing(candles, ts,
                                 win_multiplier=settings.win_multiplier
                                 if hasattr(settings, "win_multiplier") else 2.0,
-                                pool_address=row["pool_address"])
+                                pool_address=row["pool_address"],
+                                entry_override=row["entry_price_usd"])
     if tr.status == "unpriceable_loss":
+        # entry/curve refusal -> persist a pending audit trail ONLY when
+        # the call has no decided trail row yet: a hand-recovered verdict
+        # stored under a flipped pool's cache (DRUGS) must not be erased
+        # by the guard that exists to protect it. No existing row means
+        # the refusal is genuinely new information — record it pending
+        # (visible for audit, retried if the pool/cache is re-seated).
+        if tr.error and "entry/curve mismatch" in tr.error:
+            with get_connection() as conn:
+                existing = conn.execute(
+                    "SELECT status FROM trailing_results WHERE call_id=?",
+                    (call_id,)).fetchone()
+            if existing and existing["status"] in ("win", "loss", "expired"):
+                return None
+            tr.status = "pending"
+            persist_trailing_result(call_id, tr)
+            return "pending"
         return None
     # OPEN-WINDOW RULE: a call still inside its 7d window (score_state
     # 'live') has no expiry yet — 'expired' only becomes real at the day-7
@@ -825,7 +850,13 @@ def run_trailing_backfill(progress_cb: ProgressCb = _noop,
                  AND (tr.id IS NULL
                       OR cal.score_state='live'
                       OR (cal.score_state='final'
-                          AND tr.status NOT IN ('win','loss','expired')))
+                          AND tr.status NOT IN ('win','loss','expired'))
+                      -- anchor drift: rows written before the stored-entry
+                      -- fix measure against a re-derived (hour-open) entry
+                      -- instead of the engine's dollar — re-score them once
+                      OR (cal.entry_price_usd IS NOT NULL
+                          AND tr.entry_price_usd IS NOT NULL
+                          AND tr.entry_price_usd != cal.entry_price_usd))
                ORDER BY cal.id"""
             + (f" LIMIT {int(limit)}" if limit else "")
         ).fetchall()

@@ -146,3 +146,55 @@ def test_wick_clip_defends_a_CALI_style_artifact():
     r_raw = score_candles_trailing(bars, T0, wick_clip=False)    # artifact kept
     assert r_raw.peak_multiple >= 40                # artifact visible if unfiltered
     assert r_clip.peak_multiple < 1.6               # filtered verdict is honest
+
+
+# ---- entry anchor: engine's stored dollar beats re-derived hour open ----
+
+def test_entry_override_anchors_verdict_to_engine_dollar():
+    # hour opens CHEAP ($1.91), true call-minute entry $2.91. Post-entry
+    # bars dip to $1.2: below the engine floor (1.455) but ABOVE the
+    # hour-open floor (0.955->1.0). Only the honest anchor sees the stop.
+    bars = [bar(0, 1.91, 2.0, 1.5, 1.6)] + \
+           [bar(i, 1.5, 1.55, 1.2, 1.3) for i in range(1, 8)]
+    plain = score_candles_trailing(bars, T0 + timedelta(hours=2))
+    # (call 2h in: bars 1..7 are post-call; bar0 is historical anyway)
+    anchored = score_candles_trailing(bars, T0, entry_override=2.91)
+    assert anchored.entry_price_usd == 2.91                   # canonical dollar
+    assert anchored.status == "loss" and anchored.hit_trailing_stop
+    assert abs(anchored.exit_multiple - 1.455 / 2.91) < 1e-9  # honest ~0.5x call
+    # hour-open anchor: same bars, its floor (1.0 from peak 2.0) never sees
+    # the 1.2 low -> no stop-out. Anchor choice alone flips the verdict.
+    rederived = score_candles_trailing(bars, T0)
+    assert rederived.entry_price_usd == 1.91
+    assert not rederived.hit_trailing_stop
+
+
+def test_entry_bar_pre_call_low_neutralized_but_high_counts():
+    # entry bar OPENED before the call with a brutal pre-call low ($0.1) —
+    # re-anchored to $2.91 its floor is 1.455; the pre-call low must NOT
+    # fabricate a stop-out. The bar's post-call high (3.0) does update peak.
+    call = T0 + timedelta(minutes=45)
+    bars = [PricePoint(timestamp=T0, open=1.91, high=3.0, low=0.1,
+                       close=2.9, volume=10)] + \
+           [bar(i, 2.9, 3.0, 2.8, 2.9) for i in range(1, 6)]
+    r = score_candles_trailing(bars, call, entry_override=2.91)
+    assert not r.hit_trailing_stop                            # no fake stop
+    assert r.status == "expired"                              # survives window
+    assert r.peak_multiple >= 3.0 / 2.91 - 1e-9               # high still used
+
+
+def test_entry_override_rejects_flipped_curve():
+    # stored engine entry $2.91e-6 but cached curve is the $750 META asset
+    bars = [bar(0, 750.0, 755.0, 744.0, 750.0) for _ in range(3)]
+    for i in range(3):
+        pass
+    bars = [bar(i, 750.0, 755.0, 744.0, 750.0) for i in range(3)]
+    r = score_candles_trailing(bars, T0, entry_override=2.91e-6)
+    assert r.status == "unpriceable_loss"
+    assert "entry/curve mismatch" in (r.error or "")
+
+
+def test_no_override_keeps_old_behavior():
+    bars = [bar(0, 1.0, 1.05, 0.98, 1.0), bar(1, 1.0, 1.05, 0.9, 0.95)]
+    r = score_candles_trailing(bars, T0)
+    assert r.entry_price_usd == 1.0

@@ -85,9 +85,18 @@ def score_candles_trailing(
     trail_pct: float = 50.0,
     wick_clip: bool = True,
     pool_address: Optional[str] = None,
+    entry_override: Optional[float] = None,
 ) -> TrailingResult:
     """Score one call on the 50% trailing-stop strategy. `candles` must be
-    the 7d window series (hourly fine; minutes where cached)."""
+    the 7d window series (hourly fine; minutes where cached).
+
+    entry_override (user ratified 2026-09-24): the engine's canonical entry
+    — calls.entry_price_usd, the dollar the normal + fixed-SL verdicts are
+    measured from. Without it an hourly-only attach silently anchors on the
+    HOUR open and can disagree with the call-minute open by 10x+ on a
+    pumping token (691 trail rows did). When the curve's own anchor is >20x
+    from the override the series belongs to another asset entirely (flipped
+    pool, e.g. DRUGS' cached BIO curve) -> refuse, never score."""
     if not candles:
         return _unpriceable(pool_address, "no candles provided")
 
@@ -104,9 +113,32 @@ def score_candles_trailing(
         entry_c = next((c for c in series if c.timestamp > call_ts), None)
     if entry_c is None:
         return _unpriceable(pool_address, "no candles at/after call")
-    entry = entry_c.open
-    if not entry or entry <= 0:
+    curve_entry = entry_c.open
+    if not curve_entry or curve_entry <= 0:
         return _unpriceable(pool_address, "zero entry price")
+    entry = curve_entry
+    entry_bar_neutralize = False
+    if entry_override and entry_override > 0:
+        ratio = curve_entry / entry_override
+        if ratio > 20.0 or ratio * 20.0 < 1.0:
+            # the stored dollar and this curve describe different assets
+            # (flipped-pool cache, e.g. DRUGS' saved BIO curve) — refuse:
+            # never measure a real entry against a fake series.
+            return _unpriceable(
+                pool_address,
+                f"entry/curve mismatch x{curve_entry:.3e}/{entry_override:.3e}"
+                f" = {ratio:.3g}")
+        entry = float(entry_override)        # canonical: engine's stored dollar
+        # The stored entry is a call-MINUTE price; if the entry bar opened
+        # BEFORE the call (hourly granularity), its low includes pre-call
+        # trading the follower never experienced — neutralize it (cannot
+        # manufacture a stop-out from prices that predate the position).
+        # The bar's HIGH still counts: a same-hour post-call peak is real,
+        # and high-vs-target is checked before the stop (win bias, user
+        # same-candle philosophy).
+        entry_bar_neutralize = (entry_c.timestamp < call_ts
+                                and (call_ts - entry_c.timestamp)
+                                >= timedelta(minutes=2))
 
     trail_frac = 1.0 - trail_pct / 100.0        # floor as fraction of peak
     target = entry * win_multiplier
@@ -118,7 +150,7 @@ def score_candles_trailing(
     hit_win = False
     loss_stop: Optional[tuple] = None           # (floor, ts) on stop-out
 
-    for c in path:
+    for k, c in enumerate(path):
         # 1. 2x target FIRST — a candle that touches 2x is a win no matter
         #    what else it did (same-candle user rule: ties resolve for the
         #    caller, exactly like which=same_candle in the 7d engine).
@@ -133,7 +165,12 @@ def score_candles_trailing(
             peak = c.high
             peak_ts = c.timestamp
             floor = max(floor, peak * trail_frac)
-        # 3. stop-out on the current floor.
+        # 3. stop-out on the current floor — EXCEPT on a re-anchored entry
+        #    bar that opened before the call: its low includes pre-call
+        #    trading the follower never experienced, so it can never
+        #    manufacture a stop-out (high still counted above).
+        if k == 0 and entry_bar_neutralize:
+            continue
         if c.low <= floor:
             loss_stop = (floor, c.timestamp)
             break
