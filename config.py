@@ -67,6 +67,19 @@ class Settings:
         default_factory=lambda: os.getenv("POOL_GUARD", "true").strip().lower()
         not in ("0", "false", "no", "off"))
 
+    # Fake-HIGH wick filter (user policy 2026-09-24, museic/CALI lessons):
+    # hourly high > hour_gate x close triggers a 1-minute look at that hour;
+    # minute high > min_gate x close is repaired to its neighbours' mean
+    # high, then the hour is rebuilt. Highs ONLY — flash lows stand (they
+    # would have hit a real stop). See pricing/wick_filter.py.
+    wick_filter: bool = field(
+        default_factory=lambda: os.getenv("WICK_FILTER", "true").strip().lower()
+        not in ("0", "false", "no", "off"))
+    wick_hour_gate: float = field(
+        default_factory=lambda: float(os.getenv("WICK_HOUR_GATE", "3.0")))
+    wick_min_gate: float = field(
+        default_factory=lambda: float(os.getenv("WICK_MIN_GATE", "1.3")))
+
     # Rate limits (requests per minute). Empirically (2026-08) GeckoTerminal's
     # "Cloudflare protection" is a rolling-window origin limiter that trips at
     # ~23 effective RPM — ABOVE the ~20 advertised. The sustained target is

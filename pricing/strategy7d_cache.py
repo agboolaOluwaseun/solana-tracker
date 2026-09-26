@@ -100,15 +100,31 @@ def make_cached_fetchers(conn, client_v2) -> Tuple[Fetcher, Fetcher]:
         return out, reqs
 
     def fetch_hourly(pool: str, token: str, start: datetime, end: datetime) -> Tuple[List[PricePoint], int]:
-        """Hourly candles for [start,end), fresh fetch UNION cached copies.
+        """Hourly candles for [start,end), fresh fetch UNION cached copies,
+        then the fake-HIGH wick policy (pricing/wick_filter.py — user
+        ruling 2026-09-24): suspect hours (high > WICK_HOUR_GATE x close)
+        are verified against their minutes and repaired at READ time;
+        innocent hours pass through untouched, so healthy calls pay zero
+        extra API. Raw cache rows are never mutated; every pass re-derives
+        from the API's truth. Filter errors fail open (raw series).
 
-        Fresh wins on timestamp collisions; cached candles survive even when
-        the API has already pruned them (dead-pool finalization), so a day-7
-        verdict uses everything ever observed in the window. Persisting the
-        call-hour candle too (every pass refreshes it) is what enables the
-        fallback; the screening test still runs on the freshest copy.
+        Fresh wins on timestamp collisions; cached candles survive even
+        when the API has already pruned them (dead-pool finalization), so
+        a day-7 verdict uses everything ever observed in the window.
         """
         pool = _strip_network_prefix(pool, client_v2.network)
+
+        def _wick(series: List[PricePoint]) -> Tuple[List[PricePoint], int]:
+            try:
+                from pricing.wick_filter import repair_hourly
+
+                def _mins(a: datetime, b: datetime):
+                    return fetch_minute(pool, token, a, b)
+
+                return repair_hourly(series, _mins)
+            except Exception:  # noqa: BLE001 — filter never breaks pricing
+                return series, 0
+
         try:
             candles, reqs = _fetch_span(pool, token, "hour", start, end)
         except Exception:
@@ -116,15 +132,18 @@ def make_cached_fetchers(conn, client_v2) -> Tuple[Fetcher, Fetcher]:
             # rather than losing a window we spent budget observing.
             cached = load_cached(pool, token, "hour", start, end)
             if cached:
-                return cached, 1
+                series, extra = _wick(cached)
+                return series, 1 + extra
             raise
         if candles:
             store_candles(pool, token, "hour", candles)
         cached = load_cached(pool, token, "hour", start, end)
         if not cached:
-            return candles, reqs
-        merged = {_iso_ts(c.timestamp): c for c in cached + candles}
-        out = [merged[k] for k in sorted(merged)]
-        return out, reqs
+            merged_series = candles
+        else:
+            merged = {_iso_ts(c.timestamp): c for c in cached + candles}
+            merged_series = [merged[k] for k in sorted(merged)]
+        series, extra = _wick(merged_series)
+        return series, reqs + extra
 
     return fetch_hourly, fetch_minute

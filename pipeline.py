@@ -746,16 +746,30 @@ def _trailing_series(conn, call_row) -> list:
             timestamp=datetime.fromisoformat(str(r["candle_ts"]).replace("Z", "")),
             open=r["open"], high=r["high"], low=r["low"], close=r["close"],
             volume=r["volume"] or 0.0)
+    def _cached_mins(a, b):
+        rows = conn.execute(
+            "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
+            "WHERE pool_address=? AND aggregate='minute' AND candle_ts>=? "
+            "AND candle_ts<? ORDER BY candle_ts",
+            (pool, _iso(a), _iso(b))).fetchall()
+        return [_pt(r) for r in rows], 0        # cache-only: never costs API
     if not hours:
         # Some pools (the fixed-stop strategy's minute-first path) cached
         # ONLY 1m bars — use them directly; finer resolution is strictly
-        # better here (minute-precision exits).
-        return [_pt(m) for m in mins]
+        # better here (minute-precision exits). Clip their own wicks with
+        # the same minute-level policy before scoring (read-time, raw
+        # cache untouched).
+        from pricing.wick_filter import repair_minutes
+        return repair_minutes([_pt(m) for m in mins])[0]
     # Dense minute coverage (>=60% of the hourly span) means the engine
-    # deep-checked this window; prefer minutes, else hourly.
+    # deep-checked this window; prefer minutes (already wick-truthful),
+    # else hourly through the fake-high filter (cache-only minute getter,
+    # suspect hours without cached minutes get the hourly-neighbour fix).
     if mins and len(mins) >= 0.6 * len(hours) * 60:
         return [_pt(m) for m in mins]
-    return [_pt(h) for h in hours]
+    from pricing.wick_filter import repair_hourly
+    series = [_pt(h) for h in hours]
+    return repair_hourly(series, _cached_mins)[0]
 
 
 def score_trailing_call(call_id: int) -> Optional[str]:

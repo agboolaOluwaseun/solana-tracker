@@ -298,8 +298,23 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
 
         minute_cache: dict[tuple, list] = {}
 
+        # WICK POLICY (user 2026-09-24): the hourly backbone gets the same
+        # fake-high filter the GT path uses — suspect hours are drilled into
+        # the (API-backed) minute series and repaired before the engine walks
+        # them. POOL_GUARD-style fail-open: any filter error keeps the raw
+        # hourly series. minute_cache is shared so no window refetches.
         def fetch_hourly(pool, token, start, end):
-            return [p for p in hourly if start <= p.timestamp <= end], 0
+            try:
+                from pricing.wick_filter import repair_hourly
+
+                def _mins(a, b):
+                    return fetch_minute(pool, token, a, b)
+
+                fixed, extra = repair_hourly(
+                    [p for p in hourly if start <= p.timestamp <= end], _mins)
+                return fixed, extra
+            except Exception:  # noqa: BLE001 — filter never breaks the rescue
+                return [p for p in hourly if start <= p.timestamp <= end], 0
 
         def fetch_minute(pool, token, start, end):
             key = (start.isoformat(), end.isoformat())
