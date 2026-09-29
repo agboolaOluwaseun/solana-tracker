@@ -88,7 +88,8 @@ def repair_one(conn, gecko_client, birdeye_client, call_id, token_address, symbo
 
     # 3. Cache the candles
     source = "geckoterminal" if pool_addr != "birdeye" else "birdeye"
-    store_candles(pool_addr, token_address, candles, source=source)
+    store_candles(token_address, "minute", candles, pool_address=pool_addr,
+                  source=source)
 
     # 4. Score both strategies
     normal = score_candles(candles, call_ts, token_address, pool_addr)

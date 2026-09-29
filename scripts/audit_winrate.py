@@ -69,7 +69,7 @@ def main() -> int:
         if r["pool_address"] and entry:
             call_ts = datetime.fromisoformat(r["call_timestamp"].replace("Z", ""))
             end_ts = call_ts + timedelta(hours=24)
-            candles = load_candles(r["pool_address"], r["token_address"], call_ts, end_ts)
+            candles = load_candles(r["token_address"], "minute", call_ts, end_ts)
             if candles:
                 # What's the actual max high in the cached candles?
                 real_peak = max(c.high for c in candles)

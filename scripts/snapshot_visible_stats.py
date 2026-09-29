@@ -24,14 +24,25 @@ for t in ("calls", "stoploss_results", "trailing_results", "price_cache",
           "token_meta", "channels"):
     out["totals"][t] = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
 # candle coverage per consumed pool (migration must preserve this exactly)
-out["coverage"] = [
-    dict(r) for r in c.execute("""
-        SELECT cal.token_address t, pc.aggregate agg, COUNT(*) n
-        FROM price_cache pc JOIN calls cal
-          ON cal.token_address = pc.token_address
-         AND (pc.pool_address = cal.pool_address OR pc.pool_address = 'birdeye')
-        GROUP BY cal.token_address, pc.aggregate
-        ORDER BY cal.token_address""")]
+# coverage invariant: DISTINCT candle timestamps per (token, aggregate) over
+# the consumed set (pool key pre-migration; everything post-migration is
+# consumed by construction). Dedup may drop same-ts duplicate rows but must
+# never drop a timestamp.
+consumed_pairs = c.execute("""
+    SELECT DISTINCT token_address t, pool_address p FROM calls
+    WHERE token_address IS NOT NULL AND token_address<>''
+      AND pool_address NOT IN ('', 'unknown')""").fetchall()
+birdeye_tokens = {r["t"] for r in c.execute("""
+    SELECT token_address t FROM calls
+    WHERE COALESCE(note,'')||COALESCE(engine,'') LIKE '%birdeye%'""")}
+import collections
+cov = collections.defaultdict(set)
+for g in c.execute("SELECT token_address t, pool_address p, aggregate agg, candle_ts ts FROM price_cache"):
+    ok = (g["t"], g["p"]) in {(r["t"], r["p"]) for r in consumed_pairs}
+    ok = ok or (g["p"] == "birdeye" and g["t"] in birdeye_tokens)
+    if ok:
+        cov[(g["t"], g["agg"])].add(g["ts"])
+out["coverage"] = {f"{k[0]}|{k[1]}": sorted(v) for k, v in cov.items()}
 
 import sys
 json.dump(out, open(sys.argv[1], "w"), indent=0)

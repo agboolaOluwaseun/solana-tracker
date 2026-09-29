@@ -122,7 +122,7 @@ def dispatch_env(monkeypatch):
     monkeypatch.setattr(pg, "confirm_seats", fake_confirm)
 
     # engine sees constant price $1 flat candles; records which pool it scored
-    def fake_fetchers(conn, client):
+    def fake_fetchers(conn, client, chain=None):
         def fh(pool, token, start, end):
             ctrl["scored_pools"].append(pool)
             from models import PricePoint

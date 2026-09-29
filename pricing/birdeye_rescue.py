@@ -231,6 +231,7 @@ def _confirm_on_minutes(addr: str, bc: str, ts: datetime, pool_addr,
         if len(pts) < 240:  # under 4 hours of minute data across a week
             return None
         series = [pts[k] for k in sorted(pts)]
+        _rescue_saver(addr, TO_INTERNAL.get(bc, bc))("minute", series)  # raw
         clean: list[PricePoint] = []
         for i, p in enumerate(series):
             body_hi = max(p.open, p.close, p.low)
@@ -298,6 +299,24 @@ def _trail_from_series(r, series, ts):
         return None
 
 
+def _rescue_saver(token_address: str, chain: str):
+    """Return a callable that persists a Birdeye-fetched series into the
+    token-primary price_cache (raw, source='birdeye', pool stamp NULL).
+
+    NEVER raises — the rescue path must not die because its bookkeeping
+    write hiccupped; the verdict itself is already computed in memory.
+    """
+    def save(agg: str, points) -> None:
+        try:
+            from pricing.cache import store_candles
+            store_candles(token_address, agg, list(points),
+                          chain=chain, pool_address=None, source="birdeye")
+        except Exception:  # noqa: BLE001
+            log.warning("birdeye cache write failed for %s (%s)",
+                        token_address[:12], agg)
+    return save
+
+
 def try_rescue(token_address: str, chain: str, call_ts: datetime,
                now: Optional[datetime] = None) -> Optional[Eval7dResult]:
     """Return a scored Eval7dResult (status win/loss, `chain_corrected` set)
@@ -321,6 +340,14 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
             log.info("birdeye rescue: %s live on %s but zero candles — leaving",
                      token_address[:12] + "…", bc)
             return None
+
+        # TOKEN-PRIMARY CACHE (user ruling 2026-09-28): the rescued series is
+        # SAVED the moment it is fetched — raw as the API said it (wick repair
+        # stays a read-time policy). A day-7 maturation or future audit can
+        # then re-walk the honest curve without touching the Birdeye API on
+        # refresh (fetch-only policy respected: writes happen at fetch time).
+        _save = _rescue_saver(token_address, TO_INTERNAL.get(bc, bc))
+        _save("hour", hourly)
 
         minute_cache: dict[tuple, list] = {}
 
@@ -348,6 +375,7 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
                 s = int(start.replace(tzinfo=timezone.utc).timestamp()) // 60 * 60
                 e = int(end.replace(tzinfo=timezone.utc).timestamp()) // 60 * 60
                 minute_cache[key] = _ohlcv_points(token_address, bc, s, e, "1m")
+                _save("minute", minute_cache[key])   # raw, same policy
             return [p for p in minute_cache[key] if start <= p.timestamp <= end], 1
 
         pool_addr, sym, nm = _identity(token_address, "ethereum" if bc == "ethereum" else bc)

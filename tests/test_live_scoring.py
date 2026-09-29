@@ -144,7 +144,7 @@ def test_price_one_call_forwards_now(monkeypatch):
     hs = _candles_for_screening_and_walk()
     ms = [minute(CALL_TS, 1.0, 1.0, 1.0)]
 
-    def fake_cached_fetchers(conn, client_v2):
+    def fake_cached_fetchers(conn, client_v2, chain=None):
         return make_fetchers(hs, ms)
 
     monkeypatch.setattr("pricing.strategy7d_cache.make_cached_fetchers",
@@ -195,10 +195,12 @@ def test_fetchers_survive_api_pruning(tmp_path):
     conn = _sq.connect(db)
     conn.executescript("""
         CREATE TABLE price_cache (
-            pool_address TEXT NOT NULL, token_address TEXT NOT NULL,
+            chain TEXT NOT NULL, token_address TEXT NOT NULL,
             aggregate TEXT NOT NULL, candle_ts TEXT NOT NULL,
+            pool_address TEXT, source TEXT NOT NULL DEFAULT 'geckoterminal',
             open REAL, high REAL, low REAL, close REAL, volume REAL,
-            PRIMARY KEY (pool_address, token_address, aggregate, candle_ts)
+            cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (chain, token_address, aggregate, candle_ts)
         );
     """)
 

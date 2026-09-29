@@ -61,9 +61,9 @@ def reconcile_stoploss_results(dry_run: bool = True) -> dict:
             end_ts = start_ts + timedelta(hours=settings.peak_window_hours)
             
             # Try to load from cache (GeckoTerminal or Birdeye)
-            candles = load_candles("geckoterminal", token_address, start_ts, end_ts)
+            candles = load_candles(token_address, "minute", start_ts, end_ts)
             if not candles:
-                candles = load_candles("birdeye", token_address, start_ts, end_ts)
+                candles = load_candles(token_address, "minute", start_ts, end_ts)
             
             if not candles:
                 log.warning("No cached candles for call %d, skipping", call_id)
