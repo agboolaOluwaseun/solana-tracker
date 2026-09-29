@@ -205,6 +205,7 @@ def backtest_call_birdeye(
     token_address: str,
     call_ts,
     peak_window_hours: Optional[int] = None,
+    chain: str = "sol",
 ) -> tuple[BacktestResult, StoplossResult]:
     """Score one call using Birdeye (fast alternative to GeckoTerminal).
 
@@ -219,7 +220,7 @@ def backtest_call_birdeye(
     start = call_ts - timedelta(minutes=5)
     end = start + timedelta(hours=window)
 
-    cached = load_candles("birdeye", token_address, start, end)
+    cached = load_candles(token_address, "minute", start, end)
     entry_cached = any(
         c.timestamp <= call_ts < c.timestamp + timedelta(minutes=1) for c in cached
     )
@@ -240,7 +241,8 @@ def backtest_call_birdeye(
         candles = []
 
     if candles:
-        store_candles("birdeye", token_address, candles, source="birdeye")
+        store_candles(token_address, "minute", candles, chain=chain,
+                    source="birdeye")
     else:
         return _unpriceable_pair("no candles (birdeye)", "birdeye")
 

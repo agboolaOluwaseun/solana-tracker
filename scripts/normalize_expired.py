@@ -20,19 +20,20 @@ def _naive(s):
     return ts.astimezone(timezone.utc).replace(tzinfo=None) if ts.tzinfo else ts
 
 
-def _last_close(conn, pool, ts, days=7):
+def _last_close(conn, token, ts, days=7):
+    # token-primary cache (2026-09-28): the curve is looked up by token.
     end = ts + timedelta(days=days)
     rows = conn.execute(
-        "SELECT close, candle_ts FROM price_cache WHERE pool_address=? "
+        "SELECT close, candle_ts FROM price_cache WHERE token_address=? "
         "AND aggregate='hour' AND candle_ts>=? AND candle_ts<? "
         "ORDER BY candle_ts DESC LIMIT 1",
-        (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
-    if not rows:  # minute-only pools
+        (token, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+    if not rows:  # minute-only caches
         rows = conn.execute(
-            "SELECT close, candle_ts FROM price_cache WHERE pool_address=? "
+            "SELECT close, candle_ts FROM price_cache WHERE token_address=? "
             "AND aggregate='minute' AND candle_ts>=? AND candle_ts<? "
             "ORDER BY candle_ts DESC LIMIT 1",
-            (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+            (token, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
     if not rows:
         return None, None
     return rows[0]["close"], rows[0]["candle_ts"]
@@ -48,7 +49,7 @@ def main():
 
     # ── stoploss_results ────────────────────────────────────────────────
     held = conn.execute("""
-        SELECT sr.call_id, sr.entry_price_usd, cal.pool_address,
+        SELECT sr.call_id, sr.entry_price_usd, cal.token_address, cal.pool_address,
                cal.call_timestamp, cal.score_state
         FROM stoploss_results sr JOIN calls cal ON cal.id = sr.call_id
         WHERE sr.status='loss' AND sr.hit_stoploss=0
@@ -64,7 +65,7 @@ def main():
             if not r["pool_address"]:
                 skip_no_pool += 1
             else:
-                fc, fts = _last_close(conn, r["pool_address"], ts)
+                fc, fts = _last_close(conn, r["token_address"], ts)
                 if fc is None:
                     skip_no_candles += 1
         conn.execute(

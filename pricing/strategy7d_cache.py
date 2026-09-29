@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Callable, List, Optional, Tuple
 
 from models import PricePoint
+from pricing.cache import chain_for
 from pricing.geckoterminal_v2 import _strip_network_prefix, _parse_ohlcv
 
 Fetcher = Callable[[str, str, datetime, datetime], Tuple[List[PricePoint], int]]
@@ -45,30 +46,37 @@ def _row_to_point(r) -> PricePoint:
     )
 
 
-def make_cached_fetchers(conn, client_v2) -> Tuple[Fetcher, Fetcher]:
+def make_cached_fetchers(conn, client_v2, chain: Optional[str] = None) -> Tuple[Fetcher, Fetcher]:
     """Return (fetch_hourly, fetch_minute) cached against price_cache.
 
-    conn: open sqlite3 connection (row_factory rows are used; set it or pass a
+    conn: open sqlite connection (row_factory rows are used; set it or pass a
     sqlite3.Connection — we read columns by name via integer fallback).
-    client_v2: GeckoTerminalClientV2 instance; .network picks the chain.
+    client_v2: GeckoTerminalClientV2 instance; .network picks the GT network.
+    chain: internal chain slug for cache rows (calls.chain namespace);
+    derived from client_v2.network when omitted.
+
+    TOKEN-PRIMARY (2026-09-28): the cache is keyed by (chain, token, agg, ts);
+    `pool` survives only as the GT request path component + provenance stamp.
     """
+    _chain = chain or chain_for(getattr(client_v2, "network", "solana"))
 
     def load_cached(pool: str, token: str, agg: str, start: datetime, end: datetime) -> List[PricePoint]:
         rows = conn.execute(
             "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
-            "WHERE pool_address=? AND token_address=? AND aggregate=? "
-            "AND candle_ts >= ? AND candle_ts < ? ORDER BY candle_ts",
-            (pool, token, agg, _iso_ts(start), _iso_ts(end)),
+            "WHERE token_address=? AND aggregate=? AND candle_ts >= ? AND candle_ts < ? "
+            "ORDER BY candle_ts",
+            (token, agg, _iso_ts(start), _iso_ts(end)),
         ).fetchall()
         return [_row_to_point(r) for r in rows]
 
     def store_candles(pool: str, token: str, agg: str, candles: List[PricePoint]) -> None:
         for c in candles:
             conn.execute(
-                "INSERT OR REPLACE INTO price_cache (pool_address, token_address, "
-                "aggregate, candle_ts, open, high, low, close, volume) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (pool, token, agg, _iso_ts(c.timestamp), c.open, c.high, c.low, c.close, c.volume),
+                "INSERT OR REPLACE INTO price_cache (chain, token_address, "
+                "aggregate, candle_ts, pool_address, open, high, low, close, volume) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (_chain, token, agg, _iso_ts(c.timestamp), pool,
+                 c.open, c.high, c.low, c.close, c.volume),
             )
 
     def _fetch_span(pool: str, token: str, agg: str, start: datetime, end: datetime) -> Tuple[List[PricePoint], int]:

@@ -91,17 +91,22 @@ CREATE INDEX IF NOT EXISTS idx_calls_status    ON calls(status);
 CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(call_timestamp);
 
 -- Aggregate-aware candle cache: 'minute' and 'hour' rows coexist; PK includes aggregate.
+-- TOKEN-PRIMARY candle ledger (user ruling 2026-09-28): a candle belongs to
+-- a TOKEN; pool_address + source are provenance stamps, not identity. One
+-- honest curve per (chain, token, aggregate, candle_ts) — the key itself
+-- forbids a flipped pair's curve masquerading as the token's own.
 CREATE TABLE IF NOT EXISTS price_cache (
-    pool_address   TEXT NOT NULL,
+    chain          TEXT NOT NULL,        -- internal slug: sol/robinhood/eth/bsc/base/arc
     token_address  TEXT NOT NULL,
-    aggregate      TEXT NOT NULL,        -- 'minute' | 'hour'
+    aggregate      TEXT NOT NULL,        -- 'minute' | 'hour' | 'day'
     candle_ts      TEXT NOT NULL,
-    open REAL, high REAL, low REAL, close REAL, volume REAL,
+    pool_address   TEXT,                 -- provenance (NULL for birdeye series)
     source         TEXT NOT NULL DEFAULT 'geckoterminal',
+    open REAL, high REAL, low REAL, close REAL, volume REAL,
     cached_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (pool_address, token_address, aggregate, candle_ts)
+    PRIMARY KEY (chain, token_address, aggregate, candle_ts)
 );
-CREATE INDEX IF NOT EXISTS idx_price_cache_token ON price_cache(token_address);
+CREATE INDEX IF NOT EXISTS idx_price_cache_token ON price_cache(token_address, aggregate);
 
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -243,7 +243,8 @@ class GeckoTerminalClient:
 
         # 1. Try cache. Cache key includes the aggregate so minute/hour don't collide.
         agg_minutes_for_cache = {"minute": 1, "hour": 60, "day": 1440}.get(aggregate, 60)
-        cached = cache_mod.load_candles(pool_address, token_address, start, end)
+        cached = cache_mod.load_candles(token_address, aggregate, start, end,
+                                         chain=cache_mod.chain_for(self.network))
         expected = max(1, int((end - start).total_seconds() // 60 // agg_minutes_for_cache))
         
         # Determine what spans are missing from the cache.
@@ -343,7 +344,9 @@ class GeckoTerminalClient:
         
         # Store the newly fetched candles to cache (cached ones already there)
         if fetched:
-            cache_mod.store_candles(pool_address, token_address, fetched)
+            cache_mod.store_candles(token_address, aggregate, fetched,
+                                    chain=cache_mod.chain_for(self.network),
+                                    pool_address=pool_address)
         
         return _fill_and_sort(merged, start, end)
 

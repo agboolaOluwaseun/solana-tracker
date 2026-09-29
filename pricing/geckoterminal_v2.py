@@ -229,7 +229,8 @@ class GeckoTerminalClientV2:
         aggregate_candidates = [aggregate] + [a for a in _all_aggs if a != aggregate]
 
         agg_minutes_for_cache = {"minute": 1, "hour": 60, "day": 1440}.get(aggregate, 60)
-        cached = cache_mod.load_candles(pool_address, token_address, start, end)
+        cached = cache_mod.load_candles(token_address, aggregate, start, end,
+                                         chain=cache_mod.chain_for(self.network))
         expected = max(1, int((end - start).total_seconds() // 60 // agg_minutes_for_cache))
 
         if cached:
@@ -324,7 +325,9 @@ class GeckoTerminalClientV2:
                 merged.append(c)
 
         if fetched:
-            cache_mod.store_candles(pool_address, token_address, fetched)
+            cache_mod.store_candles(token_address, aggregate, fetched,
+                                    chain=cache_mod.chain_for(self.network),
+                                    pool_address=pool_address)
 
         return _fill_and_sort(merged, start, end)
 

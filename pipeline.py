@@ -727,19 +727,21 @@ def _trailing_series(conn, call_row) -> list:
     if ts.tzinfo is not None:
         ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
     end = ts + timedelta(days=settings.eval_days)
-    pool, token = call_row["pool_address"], call_row["token_address"]
-    if not pool:
+    token = call_row["token_address"]
+    if not token:
         return []
+    # TOKEN-PRIMARY (2026-09-28): the curve is looked up by the token, not
+    # by a pool — the one honest series a call can have.
     hours = conn.execute(
         "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
-        "WHERE pool_address=? AND aggregate='hour' AND candle_ts>=? AND candle_ts<? "
+        "WHERE token_address=? AND aggregate='hour' AND candle_ts>=? AND candle_ts<? "
         "ORDER BY candle_ts",
-        (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+        (token, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
     mins = conn.execute(
         "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
-        "WHERE pool_address=? AND aggregate='minute' AND candle_ts>=? AND candle_ts<? "
+        "WHERE token_address=? AND aggregate='minute' AND candle_ts>=? AND candle_ts<? "
         "ORDER BY candle_ts",
-        (pool, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
+        (token, _iso(ts - timedelta(hours=1)), _iso(end))).fetchall()
     from models import PricePoint
     def _pt(r):
         return PricePoint(
@@ -749,9 +751,9 @@ def _trailing_series(conn, call_row) -> list:
     def _cached_mins(a, b):
         rows = conn.execute(
             "SELECT candle_ts, open, high, low, close, volume FROM price_cache "
-            "WHERE pool_address=? AND aggregate='minute' AND candle_ts>=? "
+            "WHERE token_address=? AND aggregate='minute' AND candle_ts>=? "
             "AND candle_ts<? ORDER BY candle_ts",
-            (pool, _iso(a), _iso(b))).fetchall()
+            (token, _iso(a), _iso(b))).fetchall()
         return [_pt(r) for r in rows], 0        # cache-only: never costs API
     if not hours:
         # Some pools (the fixed-stop strategy's minute-first path) cached
@@ -1201,7 +1203,7 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
             pool_info = None
 
     fetch_hourly, fetch_minute = make_cached_fetchers(
-        get_connection(), _get_v2_client(chain)
+        get_connection(), _get_v2_client(chain), chain=chain
     )
 
     # ---- pool-orientation guard (museic/DRUGS lesson, 2026-09-23) ----------
@@ -1568,7 +1570,8 @@ def run_backfill(
         try:
             if pricing_source == "birdeye" and settings.pricing_engine == "legacy":
                 from pricing.backtest import backtest_call_birdeye
-                result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts)
+                result, sl_result = backtest_call_birdeye(birdeye_client, addr, call_ts,
+                                                 chain=chain)
             else:
                 result, sl_result, r7 = price_one_call(chain, client, addr, call_ts,
                                                        now=live_now,
@@ -1600,7 +1603,7 @@ def run_backfill(
                         addr[:12] + "…",
                     )
                     result, sl_result = backtest_call_birdeye(
-                        birdeye_client, birdeye_addr, call_ts,
+                        birdeye_client, birdeye_addr, call_ts, chain=chain,
                     )
         except Exception as e:
             log.exception("backtest failed for call %s", row["id"])
@@ -2285,17 +2288,8 @@ def run_stoploss_backtest(
         try:
             # Load cached 1-minute candles from price_cache — NO API calls.
             # Try birdeye source first, then geckoterminal (any pool).
-            candles = load_candles("birdeye", token_address, call_ts, end_ts)
-            if not candles:
-                pools = conn.execute(
-                    "SELECT DISTINCT pool_address FROM price_cache "
-                    "WHERE token_address = ? AND source = 'geckoterminal'",
-                    (token_address,)
-                ).fetchall()
-                for (pool,) in pools:
-                    candles = load_candles(pool, token_address, call_ts, end_ts)
-                    if candles:
-                        break
+            # token-primary cache (2026-09-28): one query, any source.
+            candles = load_candles(token_address, "minute", call_ts, end_ts)
 
             if not candles:
                 result = StoplossResult(
