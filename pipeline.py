@@ -448,11 +448,23 @@ def _rescore_pass_once(progress_cb: ProgressCb, limit: Optional[int]) -> int:
     return updated
 
 
-def _checkpoint_scanned_at(channel_id: int, window_end: datetime) -> None:
+def _checkpoint_scanned_at(channel_id: int, window_end: datetime,
+                           messages_scanned: int = 0) -> None:
     """Record that this channel's messages are now scanned through
     `window_end` (naive UTC). Opportunistic refresh anchors here instead of
     at MAX(call.timestamp). Guarded: legacy-schema DBs have no such column,
-    and a failed checkpoint must never fail a completed backfill."""
+    and a failed checkpoint must never fail a completed backfill.
+
+    NEVER advances past an empty scan (user incident 2026-09-30, offline
+    boot): a zero-message run proves nothing was observed (dead session,
+    no internet, resolved-to-nothing). Advancing the checkpoint to now on
+    such a run would mark every message since the last REAL scan as already
+    walked — silently deleting the backlog. A genuine quiet window reports
+    scanned>0 with 0 calls (messages WERE seen), so the guard is free.
+    """
+    if messages_scanned <= 0:
+        log.info("checkpoint skipped for channel %s — scanned nothing", channel_id)
+        return
     try:
         iso = window_end.replace(microsecond=0).isoformat() + "Z"
         with transaction() as conn:
@@ -1748,7 +1760,7 @@ def run_backfill(
     # MAX(call.timestamp) — which for a quiet channel means re-scanning its
     # whole silent backlog on every boot. Only reached on the completed path
     # (error/yield returned earlier), so the checkpoint never over-promises.
-    _checkpoint_scanned_at(channel_id, window_end)
+    _checkpoint_scanned_at(channel_id, window_end, messages_scanned)
 
     progress.stage = "done"
     tail = []

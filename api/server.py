@@ -823,6 +823,16 @@ async def refresh_stream(request: Request):
                 # the next refresh) finishes this channel.
                 out[0] = 'yielded'
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'progress', 'stage': 'yielded', 'message': 'paused — a fetch is using Telegram; will retry right after'})}\n\n"
+            elif getattr(result, 'stage', '') == 'error':
+                # Offline boot / dead session (2026-09-30 incident): run_backfill
+                # returned a normal Progress with stage='error' — NOT an
+                # exception — so the old else-branch marked the channel DONE,
+                # the run 'cleanly' closed its 24h gate, and the next open said
+                # 'Already updated' over a day of never-scanned channels.
+                # Error = not done: the gate keeps finished_at NULL and the
+                # next boot resumes exactly this channel.
+                out[0] = 'error'
+                yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': getattr(result, 'message', None) or 'scan failed'})}\n\n"
             else:
                 out[0] = 'done'
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"

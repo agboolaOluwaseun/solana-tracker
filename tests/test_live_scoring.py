@@ -500,3 +500,52 @@ def test_backlog_immature_folds_into_live(live_env):
     assert pipeline.rescore_live_calls() == 1
     row = _q(db_path, "SELECT status, score_state, pending_reason FROM calls")[0]
     assert row["status"] == "loss" and row["score_state"] == "live"
+
+
+def test_checkpoint_never_advances_on_empty_scan(tmp_path, monkeypatch):
+    """Offline-boot incident (2026-09-30): a refresh run that scanned ZERO
+    messages (no internet / dead session) must NOT advance
+    channels.last_scanned_at — doing so marks the whole unseen backlog as
+    walked and silently deletes it from every future refresh. A genuine
+    quiet window (scanned>0, zero calls) still checkpoints normally."""
+    import dataclasses
+    import config
+    import db as dbmod
+    import pipeline
+
+    dbfile = tmp_path / "cp.db"
+    s = dataclasses.replace(config.settings, db_path=dbfile,
+                            schema_file="schema_unified.sql")
+    monkeypatch.setattr(config, "settings", s)
+    monkeypatch.setattr(dbmod, "settings", s)
+    old = dbmod._local.__dict__.get("conn")
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+        dbmod._local.__dict__.pop("conn", None)
+    dbmod.init_db()
+    from datetime import datetime
+    with dbmod.transaction() as c:
+        c.execute("""INSERT INTO channels (telegram_channel_id, username,
+            title, window_start, window_end, last_scanned_at)
+            VALUES (1,'x','X','2026-09-01T00:00:00Z','2026-09-23T00:00:00Z',
+                    '2026-09-23T00:00:00Z')""")
+    anchor = datetime(2026, 9, 23)
+    pipeline._checkpoint_scanned_at(1, datetime(2026, 9, 30), 0)   # empty scan
+    with dbmod.get_connection() as c:
+        row = c.execute("SELECT last_scanned_at FROM channels WHERE id=1").fetchone()
+    assert row["last_scanned_at"] == "2026-09-23T00:00:00Z", \
+        "empty scan poisoned the checkpoint"
+    pipeline._checkpoint_scanned_at(1, datetime(2026, 9, 30), 12)  # real scan
+    with dbmod.get_connection() as c:
+        row = c.execute("SELECT last_scanned_at FROM channels WHERE id=1").fetchone()
+    assert row["last_scanned_at"].startswith("2026-09-30")
+    old = dbmod._local.__dict().get("conn") if False else dbmod._local.__dict__.get("conn")
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+        dbmod._local.__dict__.pop("conn", None)

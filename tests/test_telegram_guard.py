@@ -136,6 +136,10 @@ def test_checkpoint_written_on_completion(tmp_path, monkeypatch):
 
     def quiet_fetch(ref, ws, we, limit=None, progress_cb=None,
                     opportunistic=False):
+        # real fetch_window always reports its scanned count via progress_cb
+        # (the checkpoint guard treats scanned==0 as 'observed nothing')
+        if progress_cb:
+            progress_cb(1)
         return ([RawMessage(channel_id=5, message_id=1, text="gm fam",
                             timestamp=ws)], "Quiet")
 
