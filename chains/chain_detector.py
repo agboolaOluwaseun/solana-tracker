@@ -27,16 +27,19 @@ CHAIN_URL_PATTERNS = {
         r"dexscreener\.com/ethereum/",
         r"etherscan\.io",
         r"uniswap\.org",
+        r"gmgn\.ai/(?:eth|ethereum)/",
     ],
     "bsc": [
         r"dexscreener\.com/bsc/",
         r"bscscan\.com",
         r"pancakeswap\.finance",
+        r"gmgn\.ai/(?:bsc|bnb)/",
     ],
     "base": [
         r"dexscreener\.com/base/",
         r"basescan\.org",
         r"base\.org",
+        r"gmgn\.ai/base/",
     ],
     "arc": [
         r"dexscreener\.com/arc/",
@@ -45,6 +48,7 @@ CHAIN_URL_PATTERNS = {
     "robinhood": [
         r"dexscreener\.com/robinhood/",
         r"robinhood\.com",
+        r"gmgn\.ai/robinhood/",
     ]
 }
 

@@ -175,3 +175,43 @@ def test_rh_arc_links_are_allowlisted():
     text = f"call on arc\n\nhttps://dexscreener.com/arc/{addr}"
     calls = rh.parse_calls(1, 1, text, NOW)
     assert calls and calls[0].token_address == addr
+
+
+# ---- gmgn.ai link calls (thecasinoeye audit, 2026-09-30: $PAR x300+ lost) ----
+
+def test_gmgn_robinhood_token_link_is_a_call():
+    # The channel's real Sept format: link-only 'Gambled here DYOR' post.
+    text = ("Gambled some here **DYOR**\n\n"
+            "https://gmgn.ai/robinhood/token/EYEKING_0xe3a7f023a4aa2a8e41232"
+            "32c3de8ed5691d382da\n\nhttps://x.com/MeowRobinhood")
+    calls = rh.parse_calls(1, 1, text, NOW)
+    assert [c.token_address for c in calls] == [
+        "0xe3a7f023a4aa2a8e4123232c3de8ed5691d382da"]
+
+
+def test_gmgn_achievement_deeplink_stays_noise():
+    # The spydefi 'x300+ Achievement Unlocked' reposts embed the SAME mint
+    # as a t.me deep link — that host is NOT allowlisted and must never
+    # create a call (window-wide dedup also keeps only msg 2683's entry).
+    text = ("**Achievement Unlocked**: **Face Melter!** 🫠 @thecasinoeye "
+            "made a **x300+** call on [par](https://t.me/spydefi_bot?start="
+            "0x507b6f349a80114097a67b8b4677367acc15b220).")
+    assert rh.parse_calls(1, 1, text, NOW) == []
+
+
+def test_gmgn_sol_token_label_prefix_splits_to_mint():
+    # eye1_<mint>: gmgn prefixes display labels with '_' — base58 mints
+    # never contain '_', so the splitter recovers the real address only.
+    from ingestion.address_parser import extract_addresses
+    text = ("Gambled here **DYOR**\n\n"
+            "https://gmgn.ai/sol/token/eye1_5wn857GFhKHA6f2dcFG8AQEzCD96Dk"
+            "ZpiviV6csWD8vj\n\nhttps://x.com/PrivacyPadOnSOL")
+    assert extract_addresses(text) == [
+        "5wn857GFhKHA6f2dcFG8AQEzCD96DkZpiviV6csWD8vj"]
+
+
+def test_gmgn_path_segment_drives_chain_detection():
+    from chains.chain_detector import detect_chain_from_context
+    addr = "0x" + "d4" * 20
+    assert detect_chain_from_context(f"https://gmgn.ai/robinhood/token/EYEKING_{addr}", addr) == "robinhood"
+    assert detect_chain_from_context(f"https://gmgn.ai/sol/token/eye1_{addr}", addr) is None  # sol is the solana parser's domain

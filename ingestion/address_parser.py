@@ -93,7 +93,7 @@ _DEX_URL_RE = re.compile(
           dexscreener\.(?:com|io)/solana
         | geckoterminal\.com/solana/pools
         | dextools\.io/app/pair/chains/solana
-        | gmgn\.ai/sol/pool
+        | gmgn\.ai/sol/(?:pool|token)
         | birdeye\.so/token
         | pump\.fun/
         | jup\.ag/
@@ -112,7 +112,11 @@ def _addresses_in_allowed_dex_urls(text: str) -> "list[str]":
         url = um.group(0)
         # Drop non-token path segments (solscan tx/account already stripped
         # upstream; guard again here) and query params like ?chain=solana.
-        for tok in re.split(r"[/?&=:,]", url):
+        # '_' splits too: gmgn.ai prefixes display labels onto the mint
+        # (…/sol/token/eye1_5wn857GF…) — base58 never contains '_', so
+        # splitting on it can only separate label from address, never
+        # break a real mint.
+        for tok in re.split(r"[/?&=:,_]", url):
             if SOLANA_ADDR_RE.fullmatch(tok) and is_valid_solana_address(tok):
                 out.append(tok)
     return out
