@@ -45,6 +45,17 @@ BOOT_REFRESH_INTERVAL = timedelta(hours=24)   # the "once a day" window
 # (second tab, StrictMode re-mount, another window watching the stream):
 # a boot arriving then skips instead of resuming a live run.
 BOOT_JOIN_WINDOW = timedelta(minutes=3)
+# ZOMBIE-RUN GUARD (found 2026-09-30: "not all channels update on launch").
+# A run left unfinished by a crash/power loss must not outlive its own day.
+# Real incident: the Sep-23 boot run was killed mid-way; on the Sep-29
+# launch the resume reused its token, whose 28 done-channels had been
+# completed SIX DAYS EARLIER — the run folded every channel as 'done' and
+# scanned nothing, then stamped itself finished (hence "next update in 15h"
+# while channels sat days stale). An unfinished run older than the daily
+# interval is a zombie: it ROTATES to a fresh token (done list cleared)
+# instead of resuming. Cost is nil: freshly-scanned channels still answer
+# 'Already up to date' from their last_scanned_at anchors in one cheap pass.
+BOOT_RUN_MAX_AGE = BOOT_REFRESH_INTERVAL
 
 
 def _now() -> datetime:
@@ -95,14 +106,27 @@ def _row():
         ).fetchone()
 
 
+def _is_zombie(row) -> bool:
+    """Unfinished run older than the daily interval: its per-channel done
+    list is historical, not current — resuming it would silently skip
+    every channel. Rotate a fresh token instead (see BOOT_RUN_MAX_AGE)."""
+    if row is None or row["finished_at"] is not None:
+        return False
+    started = _parse(row["started_at"])
+    return started is None or (_now() - started) >= BOOT_RUN_MAX_AGE
+
+
 def boot_refresh_due() -> tuple[bool, str | None]:
     """(due?, run_token).
 
     due = no run ever, OR the last run finished >= 24h ago, OR the last
-    run never finished and started longer than BOOT_JOIN_WINDOW ago
-    (interrupted mid-way -> next boot RESUMES it with the same token and
-    its completed-channel list). An unfinished run still inside the join
-    window is live -> not due (skip; don't double-scan)."""
+    run never finished and started longer than BOOT_JOIN_WINDOW ago.
+    An interrupted run YOUNGER than BOOT_RUN_MAX_AGE RESUMES (same token,
+    completed-channel list kept — genuine crash-recovery). An interrupted
+    run OLDER than that is a zombie: mark_boot_started rotates a fresh
+    token and clears the list instead (its done-channels are historical;
+    see BOOT_RUN_MAX_AGE). An unfinished run still inside the join window
+    is live -> not due (skip; don't double-scan)."""
     try:
         ensure_gate_table()
         row = _row()
@@ -133,9 +157,15 @@ def mark_boot_started() -> str | None:
     try:
         row = _row()
         with get_connection() as conn:
-            if row is not None and row["finished_at"] is None:
+            if (row is not None and row["finished_at"] is None
+                    and not _is_zombie(row)):
                 # resume a crashed run — same token, keep completed channels
                 return row["started_at"]
+            # Fresh after finished — AND the zombie case (unfinished but
+            # older than the daily interval): both ROTATE to a new token
+            # with a cleared done list. Resuming a day-old interrupted run
+            # would fold its (now stale) completed channels as 'done' and
+            # scan nothing — the exact launch-staleness bug of Sep-29.
             new_token = _iso(_now())
             conn.execute("DELETE FROM boot_refresh_channels")
             conn.execute("""

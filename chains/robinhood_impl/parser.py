@@ -52,11 +52,12 @@ _BARE_URL_RE = re.compile(r"https?://\S+")
 # /networks/robinhood, gate.com/alpha/robinhood-0x…, the Robinhood explorer.
 _DEX_URL_RE = re.compile(
     r"""https?://[^\s"']*(?:
-          dexscreener\.(?:com|io)/robinhood
-        | geckoterminal\.com/dex-pools/networks/robinhood
-        | geckoterminal\.com/networks/robinhood
+          dexscreener\.(?:com|io)/(?:robinhood|arc)
+        | geckoterminal\.com/dex-pools/networks/(?:robinhood|arc)
+        | geckoterminal\.com/networks/(?:robinhood|arc)
         | gate\.com/alpha/robinhood-
         | explorer\.robinhood\.com/(?:address|token)
+        | arcscan\.app
         | dextools\.io/app/pair/chains/robinhood
     )[^\s"']*""",
     re.IGNORECASE | re.VERBOSE,
@@ -115,25 +116,18 @@ def parse_calls(
 
     Returns one ParsedCall per unique address (dedup within the message —
     mirrors/links can repeat the same address multiple times).
+
+    MINT-BEATS-LINK (user ruling 2026-09-30, the RUFUS/NVDA + COON/PENPE
+    lesson): a backticked/in-text token address IS the call; the address
+    inside a dexscreener/gate link is usually the POOL the author browsed,
+    not the token called. So in-text mints claim the message first, and
+    URL-extracted addresses are the FALLBACK for link-only posts (same
+    discipline as the Solana parser). A link whose address is the same mint
+    only adds nothing — dedup keeps the mint copy.
     """
     seen = set()
     out: List[ParsedCall] = []
-    # 1) Allowlisted DEX/explorer URLs carry the actual call (pool or token).
-    for addr, pos in _addresses_in_allowed_urls(text):
-        if addr in seen:
-            continue
-        seen.add(addr)
-        out.append(
-            ParsedCall(
-                channel_id=channel_id,
-                message_id=message_id,
-                token_address=addr,
-                token_symbol=_symbol_hint(text, pos),
-                timestamp=timestamp,
-                raw_text=text,
-            )
-        )
-    # 2) Regular in-text addresses (URLs stripped so bot-mirror links and
+    # 1) In-text token addresses win (URLs stripped so bot-mirror links and
     #    non-allowlisted hosts can never inject calls).
     stripped = _strip_urls(text)
     for m in EVM_ADDRESS_RE.finditer(stripped):
@@ -146,9 +140,33 @@ def parse_calls(
                 channel_id=channel_id,
                 message_id=message_id,
                 token_address=addr,
-                token_symbol=_symbol_hint(stripped, m.start()),
+                # token_symbol left None on purpose (user ruling 2026-09-30):
+                # the "$last-ticker-before-address" guess mislabels calls in
+                # every channel that compares coins in prose; the canonical
+                # ticker comes from the data source at pricing time
+                # (token_meta / DexScreener / Birdeye identity).
+                token_symbol=None,
                 timestamp=timestamp,
                 raw_text=text,
             )
         )
+    # 2) Allowlisted DEX/explorer URLs: fallback when NO in-text mint exists
+    #    (link-only posts). If the message already yielded in-text mints,
+    #    URL pool ids are skipped entirely — they are venues, not calls.
+    if not out:
+        for addr, pos in _addresses_in_allowed_urls(text):
+            a = addr.lower()
+            if a in seen:
+                continue
+            seen.add(a)
+            out.append(
+                ParsedCall(
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    token_address=a,
+                    token_symbol=None,       # data-source-resolved, see above
+                    timestamp=timestamp,
+                    raw_text=text,
+                )
+            )
     return out

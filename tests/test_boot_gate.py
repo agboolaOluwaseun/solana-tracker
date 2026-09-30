@@ -188,3 +188,34 @@ def test_refresh_skips_birdeye_but_fetch_allows():
     src = (Path(__file__).resolve().parents[1] / "api" / "server.py").read_text()
     refresh = src.split("async def _one_channel")[1].split("async def event_generator")[0]
     assert "birdeye_rescue=False" in refresh
+
+
+def test_zombie_run_rotates_instead_of_resuming(gate_env, monkeypatch):
+    """The Sep-29 launch-staleness bug: a run interrupted for SIX DAYS
+    must NOT resume — its completed-channel list is historical and would
+    fold every channel as 'done', scanning nothing. Older than
+    BOOT_RUN_MAX_AGE, mark_boot_started rotates a fresh token and clears
+    the done list."""
+    t = BR.mark_boot_started()
+    BR.mark_channel_done(t, 101)
+    BR.mark_channel_done(t, 102)
+    # interrupted: no mark_boot_finished
+    _advance(monkeypatch, days=6)
+    due, token = BR.boot_refresh_due()
+    assert due and token == t                       # still the old token seen
+    t2 = BR.mark_boot_started()
+    assert t2 != t                                  # ROTATED, not resumed
+    assert BR.completed_channel_ids(t2) == set()    # done list cleared
+    # and the fresh run must NOT lose its own resume behaviour:
+    BR.mark_channel_done(t2, 101)
+    _advance(monkeypatch, minutes=4)
+    assert BR.mark_boot_started() == t2             # young interrupt resumes
+
+
+def test_zombie_boundary_resumes_within_age(gate_env, monkeypatch):
+    """An interrupted run YOUNGER than BOOT_RUN_MAX_AGE still resumes
+    (genuine same-day crash recovery — the original feature)."""
+    t = BR.mark_boot_started()
+    BR.mark_channel_done(t, 101)
+    _advance(monkeypatch, hours=23)
+    assert BR.mark_boot_started() == t

@@ -133,14 +133,45 @@ def test_sol_xcom_link_not_a_call():
 
 # ---- Symbol hints: market-cap phrases are amounts, not tickers -------------
 
-def test_rh_symbol_skips_amount_phrases():
-    # The real FLYAI message: ($MAGIC) ... $2B market cap ... $FLYAI ... $300K
+def test_rh_symbol_never_comes_from_message_text():
+    # Ruling B (2026-09-30, RUFUS/NVDA + COON/PENPE lesson): the
+    # last-$TICKER-before-address heuristic mislabels every channel that
+    # compares coins in prose. EVM parses leave the symbol empty; the
+    # canonical ticker arrives from the DATA SOURCE at pricing time
+    # (token_meta / DexScreener / Birdeye identity -> apply_eval7d).
     text = ("The lead AI engineer at Treasure DAO ($MAGIC), which ran to a "
             "~$2B market cap, has launched $FLYAI. Sitting around a $300K "
             "market cap. 0x0088CE7905025c4B5ea1d49aB6179B6aaADB3B9C")
     calls = rh.parse_calls(1, 1, text, NOW)
-    assert calls[0].token_symbol == "FLYAI"    # not '300K', not 'MAGIC'
+    assert calls[0].token_address == "0x0088ce7905025c4b5ea1d49ab6179b6aaadb3b9c"
+    assert calls[0].token_symbol is None
 
 
-def test_rh_symbol_keeps_digit_prefixed_tickers():
-    assert rh.parse_calls(1, 1, "$1000PEPE big. 0x" + "a"*40, NOW)[0].token_symbol == "1000PEPE"
+def test_rh_mint_beats_pool_link():
+    # Ruling A (RUFUS): in-text backticked mint WINS over the dexscreener
+    # pool URL; the pool address must never become the tracked token.
+    pool = "0x" + "a1" * 32
+    mint = "0x46B6995b02B1e3Afa39033243999e00d739615F1"
+    text = (f"Gamboled a bag on $RUFUS. Paired with $NVDA.\n\n"
+            f"https://dexscreener.com/robinhood/{pool}\n\n`{mint}`")
+    calls = rh.parse_calls(1, 1, text, NOW)
+    addrs = [c.token_address for c in calls]
+    assert addrs == [mint.lower()]          # ONE call: the mint, not the pool
+
+
+def test_rh_link_only_post_falls_back_to_url():
+    # The URL path stays a fallback for link-only posts (no in-text mint).
+    pool = "0x" + "b2" * 32
+    text = f"New pair \n\n https://dexscreener.com/robinhood/{pool}"
+    calls = rh.parse_calls(1, 1, text, NOW)
+    assert [c.token_address for c in calls] == [pool]
+    assert calls[0].token_symbol is None
+
+
+def test_rh_arc_links_are_allowlisted():
+    # Ruling A part 2 (Happy/$USDC): dexscreener /arc/ URLs count as
+    # call venues too — link-only Arc posts must not be invisible.
+    addr = "0x" + "c3" * 20
+    text = f"call on arc\n\nhttps://dexscreener.com/arc/{addr}"
+    calls = rh.parse_calls(1, 1, text, NOW)
+    assert calls and calls[0].token_address == addr
