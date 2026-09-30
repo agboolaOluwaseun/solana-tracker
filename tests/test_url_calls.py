@@ -215,3 +215,16 @@ def test_gmgn_path_segment_drives_chain_detection():
     addr = "0x" + "d4" * 20
     assert detect_chain_from_context(f"https://gmgn.ai/robinhood/token/EYEKING_{addr}", addr) == "robinhood"
     assert detect_chain_from_context(f"https://gmgn.ai/sol/token/eye1_{addr}", addr) is None  # sol is the solana parser's domain
+
+
+def test_gmgn_arc_token_link_is_a_call():
+    # completion of the gmgn ruling (a7af117): arc was in the dexscreener
+    # alternation but missed in the gmgn one — tomleessonscalls (2026-09-15,
+    # 'tailed wep here') posts calls as gmgn.ai/arc/token links.
+    text = ("https://gmgn.ai/arc/token/0xc468a7117725722c163cef0f717414e0a7afeaa9\n\n"
+            "tailed wep here")
+    calls = rh.parse_calls(1, 1, text, NOW)
+    assert [c.token_address for c in calls] == [
+        "0xc468a7117725722c163cef0f717414e0a7afeaa9"]
+    from chains.chain_detector import detect_chain_from_context
+    assert detect_chain_from_context(text, "0xc468a7117725722c") == "arc"

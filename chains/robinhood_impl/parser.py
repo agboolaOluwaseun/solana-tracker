@@ -58,7 +58,7 @@ _DEX_URL_RE = re.compile(
         | gate\.com/alpha/robinhood-
         | explorer\.robinhood\.com/(?:address|token)
         | arcscan\.app
-        | gmgn\.ai/(?:robinhood|eth|ethereum|bsc|bnb|base)/token
+        | gmgn\.ai/(?:robinhood|eth|ethereum|bsc|bnb|base|arc)/token
         | dextools\.io/app/pair/chains/robinhood
     )[^\s"']*""",
     re.IGNORECASE | re.VERBOSE,

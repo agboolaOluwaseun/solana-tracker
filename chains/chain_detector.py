@@ -44,6 +44,7 @@ CHAIN_URL_PATTERNS = {
     "arc": [
         r"dexscreener\.com/arc/",
         r"arcscan\.app",
+        r"gmgn\.ai/arc/",
     ],
     "robinhood": [
         r"dexscreener\.com/robinhood/",
