@@ -694,8 +694,15 @@ async def refresh_stream(request: Request):
         due, _prior_token = BR.boot_refresh_due()
         if not force and not due:
             hrs = BR.hours_since_last_finished()
-            msg = (f"Already updated — channels auto-refresh once a day"
-                   + (f" (last completed {hrs:.0f}h ago)" if hrs is not None else ""))
+            if hrs is None:
+                # not-due with no completed run = a refresh is IN FLIGHT
+                # (the 3-min join window). Saying "Already updated" here is
+                # the offline-boot lie (2026-09-30): the tab was mid-run,
+                # not done. Tell the truth: it's running — reload to watch.
+                msg = "Refresh already in progress — reload to watch it"
+            else:
+                msg = (f"Already updated — channels auto-refresh once a day"
+                       f" (last completed {hrs:.0f}h ago)")
             async def _skip():
                 yield f"data: {json.dumps({'status': 'skipped', 'message': msg})}\n\n"
                 yield f"data: {json.dumps({'status': 'complete', 'skipped': True})}\n\n"

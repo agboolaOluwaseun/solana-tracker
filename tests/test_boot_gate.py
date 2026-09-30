@@ -219,3 +219,15 @@ def test_zombie_boundary_resumes_within_age(gate_env, monkeypatch):
     BR.mark_channel_done(t, 101)
     _advance(monkeypatch, hours=23)
     assert BR.mark_boot_started() == t
+
+
+def test_running_age_distinguishes_inflight_from_complete(gate_env, monkeypatch):
+    """The reopen-lie fix (2026-09-30 offline boot): the server's skip
+    message must know an in-flight run from a completed day. running_age_s
+    returns the live run's age, None once closed."""
+    t = BR.mark_boot_started()
+    assert BR.running_age_s() is not None            # in flight
+    assert BR.hours_since_last_finished() is None    # nothing completed yet
+    BR.mark_boot_finished(t)
+    assert BR.running_age_s() is None                # closed
+    assert BR.hours_since_last_finished() < 1/3600  # just completed

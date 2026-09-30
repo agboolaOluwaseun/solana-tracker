@@ -232,3 +232,20 @@ def hours_since_last_finished() -> float | None:
         return None if f is None else (_now() - f).total_seconds() / 3600.0
     except Exception:  # pragma: no cover
         return None
+
+
+def running_age_s() -> float | None:
+    """Minutes-precision age of a run that is CURRENTLY in flight (never
+    finished), or None when no run is live. The offline-boot incident
+    (2026-09-30) showed the join-window skip and the completed-today skip
+    share the message text 'Already updated' — a refresh that is RUNNING
+    or that DIED minutes ago is not 'already updated', and the tab must
+    say so honestly."""
+    try:
+        row = _row()
+        if row is None or row["finished_at"] is not None:
+            return None
+        s = _parse(row["started_at"])
+        return None if s is None else (_now() - s).total_seconds()
+    except Exception:  # pragma: no cover
+        return None
