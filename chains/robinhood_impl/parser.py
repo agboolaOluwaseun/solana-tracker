@@ -47,12 +47,17 @@ _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]*)\)")
 _BARE_URL_RE = re.compile(r"https?://\S+")
 
 # Allowlisted hosts whose embedded 0x addresses count as calls — chain-scoped
-# paths only, so dexscreener.com/bsc/0x… (a BSC token) never enters as a
-# Robinhood call. Robinhood-chain links: dexscreener/robinhood, geckoterminal
-# /networks/robinhood, gate.com/alpha/robinhood-0x…, the Robinhood explorer.
+# paths only. The original set was robinhood/arc (the first chains this parser
+# served); every supported EVM path now maps to ITS OWN chain via
+# chains.chain_detector.CHAIN_URL_PATTERNS, so dexscreener.com/bsc/0x… is a
+# BSC call, never a Robinhood one — the path segment is the chain authority,
+# and the pricing resolver's DexScreener search fallback maps pair-vs-token
+# ambiguity. (wifechangingcalls audit 2026-09-30: /bsc/ + /base/ link-only
+# posts were the last demonstrated blindness; debank profile URLs are
+# DELIBERATELY NOT allowlisted — those embed WALLET addresses, not tokens.)
 _DEX_URL_RE = re.compile(
     r"""https?://[^\s"']*(?:
-          dexscreener\.(?:com|io)/(?:robinhood|arc)
+          dexscreener\.(?:com|io)/(?:robinhood|arc|bsc|base|eth(?:ereum)?)
         | geckoterminal\.com/dex-pools/networks/(?:robinhood|arc)
         | geckoterminal\.com/networks/(?:robinhood|arc)
         | gate\.com/alpha/robinhood-

@@ -24,7 +24,7 @@ DS_CHAIN_MAP = {
 # URL patterns for chain detection
 CHAIN_URL_PATTERNS = {
     "eth": [
-        r"dexscreener\.com/ethereum/",
+        r"dexscreener\.com/eth(?:ereum)?/",
         r"etherscan\.io",
         r"uniswap\.org",
         r"gmgn\.ai/(?:eth|ethereum)/",

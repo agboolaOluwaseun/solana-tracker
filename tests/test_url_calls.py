@@ -2,9 +2,11 @@
 
 Both parsers used to strip ALL URLs before extraction, so channels whose
 posts are comment + dexscreener/gate links yielded almost no calls. Fix:
-addresses inside a CHAIN-SCOPED allowlist of DEX hosts are extracted; every
-other URL (t.me bot-mirror params, cross-chain paths like /bsc//eth/) stays
-dead — those regressions are tested explicitly here.
+addresses inside a chain-scoped allowlist of DEX hosts are extracted; every
+other URL (t.me bot-mirror params, explorer tx paths, wallet-profile hosts
+like debank) stays dead — those regressions are tested explicitly here.
+Cross-chain safety: a /bsc/ link parses as a BSC call (chain detected from
+the path), never as robinhood — detect_chain assertions per path below.
 """
 from datetime import datetime
 
@@ -52,9 +54,15 @@ def test_rh_pool_key_only_from_urls_not_bare_prose():
 
 # ---- Robinhood chain: everything else stays dead ---------------------------
 
-def test_rh_bsc_url_not_a_call():
+def test_rh_bsc_url_is_a_bsc_call_not_robinhood():
+    # (policy changed 2026-09-30, wifechangingcalls audit: /bsc//base//eth/
+    # dexscreener links ARE calls — the EVM parser is the all-chain gatherer,
+    # chain detection downstream makes the PATH SEGMENT the chain authority,
+    # so a BSC link can never masquerade as a Robinhood call.)
     text = "Giggle academy. https://dexscreener.com/bsc/" + ADDR_BSC
-    assert rh_addrs(text) == []
+    assert rh_addrs(text) == [ADDR_BSC.lower()]
+    from chains.chain_detector import detect_chain
+    assert detect_chain(text, ADDR_BSC) == "bsc"
 
 
 def test_rh_tme_bot_mirror_still_excluded():
@@ -228,3 +236,23 @@ def test_gmgn_arc_token_link_is_a_call():
         "0xc468a7117725722c163cef0f717414e0a7afeaa9"]
     from chains.chain_detector import detect_chain_from_context
     assert detect_chain_from_context(text, "0xc468a7117725722c") == "arc"
+
+
+def test_rh_base_and_eth_paths_route_to_their_chains():
+    from chains.chain_detector import detect_chain
+    base = "0x3ebbbaa60c309ec7d857a399051a5e20eb886215"
+    text = "https://dexscreener.com/base/" + base
+    assert rh_addrs(text) == [base.lower()]
+    assert detect_chain(text, base) == "base"
+    eth = "0x5c67b6dc46bbc8b16c7e72749e57138d22b9b3b2"
+    t2 = "repeg https://dexscreener.com/eth/" + eth
+    assert rh_addrs(t2) == [eth.lower()]
+    assert detect_chain(t2, eth) == "eth"
+
+
+def test_debank_wallet_profile_is_not_a_call():
+    # (tomleessons/wife audit watch-item: debank profiles embed WALLET
+    # addresses — a $50K buy on $SPIKE is commentary, not the token mint.)
+    spike = "0xdbed41aaeb80854a2a744a60d9c721f0580e67e6"
+    text = "50,000$ buy on $SPIKE\n\nhttps://debank.com/profile/" + spike
+    assert rh_addrs(text) == []
