@@ -402,3 +402,55 @@ def test_apply_eval7d_persists_embedded_trailing_verdict(tmp_path, monkeypatch):
     if emb is not None:
         emb.close()
         dbmod._local.__dict__.pop("conn", None)
+
+
+# ---- scale-mix guard (s$ msg 3928 lesson, 2026-09-30) ----
+
+def test_rescue_refuses_decimal_rebase_series(monkeypatch):
+    """A Birdeye week whose closes span >1e6 (dust 1e-23 days beside true
+    1e-5 days — a decimal re-base, NOT a wick) must be REFUSED outright:
+    no verdict, no cached curve, unpriceable stays. The >=50x 1m-audit
+    cannot catch this class because the spike is real in the data; only
+    the units are wrong (3928 'confirmed' its way to a 7.5e16x win)."""
+    _flag_off(monkeypatch, key=True, rescue=True)
+    mixed = [1e-23] * 84 + [1.5e-5] * 84          # 1.5e18 spread
+    monkeypatch.setattr(br, "_get", make_get({"robinhood"}, hourly_rows(mixed)))
+    assert br.try_rescue(ADDR, "robinhood", CALL_TS) is None
+
+
+def test_rescue_allows_honest_big_pump(monkeypatch):
+    """A genuine 1,000x week (spread 1e3 << 1e6) still rescues normally —
+    the guard must not veto the violent microcap pumps that are exactly
+    why the rescue exists (HENRY 73x, 2452 115x class)."""
+    _flag_off(monkeypatch, key=True, rescue=True)
+    # ~3x week: a legit win that clears the guard AND stays under the
+    # >=50x minute-audit threshold (whose fake-minutes path would refuse).
+    prices = [1e-4] * 84 + [3e-4] * 84
+    monkeypatch.setattr(br, "_get", make_get({"robinhood"}, hourly_rows(prices)))
+    r = br.try_rescue(ADDR, "robinhood", CALL_TS)
+    assert r is not None and r.status_plain == "win"
+
+
+def test_rescue_scale_guard_runs_before_cache_save(monkeypatch):
+    """The refused mixed-scale series must NOT be written to price_cache
+    either — a contaminated curve in the token-primary table is the one
+    thing the whole redesign exists to prevent. The guard sits before
+    _rescue_saver in try_rescue; prove the saver never fires for a refusal
+    while the normal-path saver does."""
+    import pricing.cache as cache_mod
+    _flag_off(monkeypatch, key=True, rescue=True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(cache_mod, "store_candles",
+                        lambda *a, **k: calls.append((a, k)) or 0)
+
+    mixed = [1e-23] * 84 + [1.5e-5] * 84
+    monkeypatch.setattr(br, "_get", make_get({"robinhood"}, hourly_rows(mixed)))
+    assert br.try_rescue(ADDR, "robinhood", CALL_TS) is None
+    assert calls == [], "refused series leaked into store_candles"
+
+    # control: an honest series must save (guard ordering not over-broad)
+    prices = [1e-4] * 84 + [3e-4] * 84
+    calls.clear()
+    monkeypatch.setattr(br, "_get", make_get({"robinhood"}, hourly_rows(prices)))
+    assert br.try_rescue(ADDR, "robinhood", CALL_TS) is not None
+    assert calls, "honest rescue series was NOT cached (saver must fire)"

@@ -50,6 +50,11 @@ log = logging.getLogger(__name__)
 EVM_CHAINS = ("bsc", "base", "ethereum", "robinhood")
 TO_INTERNAL = {"bsc": "bsc", "base": "base", "ethereum": "eth",
                "robinhood": "robinhood", "solana": "sol"}
+# Max weekly-close spread an honest 7-day window may show before the rescue
+# treats the series as scale-contaminated (decimal re-base; s$ msg 3928:
+# dust 1e-23 days beside true 1e-5 days in ONE Birdeye series -> 7.5e16x
+# 'win'). 1e6 = 1,000,000% — no legitimate microcap week spans that.
+RESCUE_SCALE_SPREAD = 1e6
 
 _lock = threading.Lock()
 _last = {"price": 0.0, "ohlcv": 0.0}
@@ -339,6 +344,23 @@ def try_rescue(token_address: str, chain: str, call_ts: datetime,
         if not hourly:
             log.info("birdeye rescue: %s live on %s but zero candles — leaving",
                      token_address[:12] + "…", bc)
+            return None
+
+        # SCALE-MIX GUARD (s$ msg 3928 lesson, 2026-09-30): a Birdeye series
+        # can contain a DECIMAL RE-BASE — the token's price printed at
+        # ~1e-23 scale for its first days, then at true ~1e-5 scale (dust/
+        # real halves of ONE series). The >=50x 1m-confirmation cannot see
+        # this: the spike is real in the data, only the units are wrong
+        # (3928 "wick-confirmed" its way to a 7.5e16x win). Fingerprint:
+        # weekly close spread beyond any honest 7d window (>1e6 =
+        # 1,000,000%). REFUSE before evaluating and before saving — a
+        # mixed-scale curve must never enter the token-primary cache, and
+        # unpriceable (no honest data) is the truthful verdict.
+        cl = [p.close for p in hourly if p.close and p.close > 0]
+        if len(cl) >= 2 and (max(cl) / min(cl)) > RESCUE_SCALE_SPREAD:
+            log.info("birdeye rescue: %s series spans %.1e x its own range "
+                     "— decimal re-base mix, refusing",
+                     token_address[:12] + "…", max(cl) / min(cl))
             return None
 
         # TOKEN-PRIMARY CACHE (user ruling 2026-09-28): the rescued series is
