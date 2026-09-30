@@ -549,3 +549,38 @@ def test_checkpoint_never_advances_on_empty_scan(tmp_path, monkeypatch):
         except Exception:
             pass
         dbmod._local.__dict__.pop("conn", None)
+
+
+def test_reconcile_deletes_call_with_trail_children():
+    """FOREIGN KEY regression (Minty scan 2026-09-30): a superseded duplicate
+    that carries a trailing_results row must be deletable — the reconciler
+    only knew stoploss_results as a verdict child."""
+    import pipeline
+    conn = pipeline.get_connection()
+    conn.execute("INSERT INTO channels (id, telegram_channel_id, username,"
+                 " title, window_start, window_end, last_scanned_at)"
+                 " VALUES (5, 995, 'minty-test', 't', '2026-09-01T00:00:00',"
+                 " '2026-09-30T00:00:00', '2026-09-30T00:00:00')")
+    conn.commit()
+    def add(mid, ts, addr):
+        cur = conn.execute("""INSERT INTO calls (channel_id, message_id,
+            token_address, token_symbol, chain, call_timestamp, status,
+            created_at) VALUES (5, ?, ?, 'X', 'sol', ?, 'loss', '2026-09-30T00:00:00')""",
+            (mid, addr, ts))
+        return cur.lastrowid
+    first = add(10, "2026-09-01T10:00:00", "MINTAAA")
+    # same symbol, later mention -> superseded duplicate, with BOTH children
+    dup = add(11, "2026-09-02T10:00:00", "MINTBBB")
+    conn.execute("INSERT INTO stoploss_results (call_id, is_win, status)"
+                 " VALUES (?, 0, 'done')", (dup,))
+    conn.execute("INSERT INTO trailing_results (call_id, is_win, status)"
+                 " VALUES (?, 0, 'done')", (dup,))
+    conn.commit()
+    deleted = pipeline.reconcile_channel_duplicates(5, chain="sol")
+    assert deleted == 1
+    def cnt(q, p):
+        return list(conn.execute(q, p).fetchone().values())[0]
+    assert cnt("SELECT COUNT(*) FROM calls WHERE id=?", (dup,)) == 0
+    assert cnt("SELECT COUNT(*) FROM trailing_results WHERE call_id=?", (dup,)) == 0
+    assert cnt("SELECT COUNT(*) FROM stoploss_results WHERE call_id=?", (dup,)) == 0
+    assert cnt("SELECT COUNT(*) FROM calls WHERE id=?", (first,)) == 1

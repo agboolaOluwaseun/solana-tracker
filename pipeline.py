@@ -160,6 +160,21 @@ def make_buckets(start: datetime) -> WeekBuckets:
 PRESET_KEYS = ("1d", "3d", "7d", "1m", "2m", "3m", "4m", "5m")
 
 
+def _delete_verdict_children(conn, ph: str, ids: list) -> None:
+    """Delete every verdict row that FK-references a call about to be dropped.
+
+    stoploss_results was the only child table when the dedup reconcilers were
+    written; trailing_results (7d engine) shipped later and was never added —
+    a superseded duplicate carrying a trail row made DELETE FROM calls abort
+    with FOREIGN KEY constraint failed, and the caller's except-sink marked
+    the whole channel scan errored (Minty scan, 2026-09-30). Table-driven so
+    the next verdict table joins the family without another footgun.
+    ('7d' is the strategy key used by BOTH trailing tables' sibling caches;
+    nothing else in the engine is per-call child besides stoploss/trailing.)"""
+    for table in ("trailing_results",):
+        conn.execute(f"DELETE FROM {table} WHERE call_id IN ({ph})", ids)
+
+
 def preset_window(preset: str, now: Optional[datetime] = None) -> tuple[datetime, datetime]:
     """Return (start, end) for a backfill preset. end = now; start anchored to
     the period boundary so a 1d scan always covers 24-48h, monthly presets
@@ -223,6 +238,7 @@ def reconcile_channel_duplicates(channel_id: int,
         ph = ",".join("?" * len(to_delete))
         with transaction() as conn:
             conn.execute(f"DELETE FROM stoploss_results WHERE call_id IN ({ph})", to_delete)
+            _delete_verdict_children(conn, ph, to_delete)
             conn.execute(f"DELETE FROM calls WHERE id IN ({ph})", to_delete)
         log.info("reconcile: deleted %d superseded duplicate call(s) for channel %s", len(to_delete), channel_id)
     return len(to_delete)
@@ -273,6 +289,7 @@ def reconcile_by_resolved_identity(channel_id: int,
         ph = ",".join("?" * len(to_delete))
         with transaction() as conn:
             conn.execute(f"DELETE FROM stoploss_results WHERE call_id IN ({ph})", to_delete)
+            _delete_verdict_children(conn, ph, to_delete)
             conn.execute(f"DELETE FROM calls WHERE id IN ({ph})", to_delete)
         log.info("reconcile-by-identity: deleted %d resolved-identity duplicate(s) for channel %s", len(to_delete), channel_id)
     return len(to_delete)
