@@ -584,3 +584,45 @@ def test_reconcile_deletes_call_with_trail_children():
     assert cnt("SELECT COUNT(*) FROM trailing_results WHERE call_id=?", (dup,)) == 0
     assert cnt("SELECT COUNT(*) FROM stoploss_results WHERE call_id=?", (dup,)) == 0
     assert cnt("SELECT COUNT(*) FROM calls WHERE id=?", (first,)) == 1
+
+
+# ---- narration honesty: new vs backlog (user 2026-10-01, '8 scored') ----
+
+def test_persist_parsed_call_reports_insert():
+    """Contract the narration depends on: True only when a row is ACTUALLY
+    new; the idempotent re-mention (INSERT OR IGNORE) returns False."""
+    import pipeline
+    from models import ParsedCall
+    conn = pipeline.get_connection()
+    conn.execute("INSERT INTO channels (id, telegram_channel_id, username,"
+                 " title, window_start, window_end, last_scanned_at)"
+                 " VALUES (77, 99777, 'ins-test', 't', '2026-09-01T00:00:00',"
+                 " '2026-10-01T00:00:00', '2026-10-01T00:00:00')")
+    conn.commit()
+    pc = ParsedCall(channel_id=77, message_id=5, raw_text="$T AAAmint1",
+                    token_address="AAAmint1", token_symbol="T",
+                    token_name=None, timestamp=datetime(2026, 9, 30, 12))
+    assert pipeline.persist_parsed_call(77, pc, 1, chain="sol") is True
+    assert pipeline.persist_parsed_call(77, pc, 1, chain="sol") is False
+
+
+def test_backlog_priced_is_announced_not_counted_as_found(live_env):
+    """Oliver's '8 scored' case: a scan that finds NOTHING new but prices
+    pending rows left behind by an earlier crashed run. The done line must
+    separate new vs backlog, and when everything is new the wording is
+    byte-identical to the old format (no behavior change for healthy days)."""
+    db_path, pipeline, ctrl, seed = live_env
+    now = datetime.utcnow().replace(microsecond=0)
+    backlog_ts = now - timedelta(days=2)
+    cid = seed(SOL, backlog_ts)              # pending row from a previous run
+
+    ctrl["next"] = {"*": lambda now, call_ts: _pair(
+        "win", complete=True, note="2x",
+        end7=call_ts + timedelta(days=7))}
+    prog = pipeline.run_backfill("@livetests", now - timedelta(hours=1),
+                                 now, title="Live Tests", username="livetests")
+    # this scan inserted 0 (fake fetch returns no addresses) but priced 1
+    assert prog.inserted == 0
+    assert prog.priced == 1
+    assert "1 backlog from earlier runs" in prog.message
+    assert "0 new" in prog.message

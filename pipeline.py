@@ -85,6 +85,9 @@ class Progress:
     live: int = 0        # 7d: provisional verdicts inside the open window
     waiting: int = 0     # 7d: market data not indexed yet, retry next pass
     birdeye_saved: int = 0  # unpriceable verdicts rescued by the Birdeye retry
+    inserted: int = 0      # rows THIS scan newly inserted (vs backlog it
+                           # re-priced — 'scored' alone read as over-capture
+                           # when crashed runs left pending rows behind)
     total_calls: int = 0
     message: str = ""
 
@@ -589,8 +592,12 @@ def ensure_channel(
 
 
 def persist_parsed_call(channel_id: int, call, week_index: int,
-                        chain: str = "sol") -> None:
+                        chain: str = "sol") -> bool:
     """Insert a parsed call as 'pending' (idempotent on the unique key).
+
+    Returns True when a row was ACTUALLY inserted, False when INSERT OR
+    IGNORE hit an existing row (re-mention / dedup) — the scan narration
+    needs to tell 'new calls' apart from 'backlog this run priced'.
 
     `chain` is written only on the unified schema; legacy rows are all
     Solana by definition."""
@@ -603,7 +610,7 @@ def persist_parsed_call(channel_id: int, call, week_index: int,
     if has_chain:
         params.insert(1, chain)
     with transaction() as conn:
-        conn.execute(
+        cur = conn.execute(
             f"""
             INSERT OR IGNORE INTO calls
                 (channel_id, {cols}message_id, raw_text, token_address, token_symbol,
@@ -612,6 +619,7 @@ def persist_parsed_call(channel_id: int, call, week_index: int,
             """,
             params,
         )
+        return cur.rowcount > 0
 
 
 def apply_backtest(channel_id: int, call_id: int, message_id: int, result) -> None:
@@ -1493,12 +1501,15 @@ def run_backfill(
         chain_groups[detected_chain].append(item["call"])
     
     # Persist all chains
+    new_rows = 0
     for chain_name, calls in chain_groups.items():
         for parsed in calls:
             week_index = buckets.week_index(parsed.timestamp)
             if week_index == 0:
                 week_index = max(1, min(settings.window_weeks, week_index or 1))
-            persist_parsed_call(channel_id, parsed, week_index, chain=chain_name)
+            if persist_parsed_call(channel_id, parsed, week_index, chain=chain_name):
+                new_rows += 1
+    progress.inserted = new_rows
     
     progress.found = deduped_count
     progress.total_calls = deduped_count
@@ -1543,9 +1554,15 @@ def run_backfill(
         (channel_id,),
     ).fetchall()
     progress.total_calls = len(pending)
+    _new = progress.inserted
+    _backlog = max(0, len(pending) - _new)   # reconcile may have deleted a
+                                             # row this run inserted (update-
+                                             # post dedup) — never show '-N'
     progress.message = (
-        f"{len(pending)} token calls found — checking pools via "
-        f"DexScreener + GeckoTerminal…"
+        (f"{len(pending)} token calls to price — {_new} new, "
+         f"{_backlog} backlog from earlier runs" if _backlog > 0 else
+         f"{len(pending)} new token calls") + " — checking pools via "
+        "DexScreener + GeckoTerminal…"
         if pending else "no new calls to price"
     )
     log.info(
@@ -1785,6 +1802,14 @@ def run_backfill(
 
     progress.stage = "done"
     tail = []
+    # New-vs-backlog honesty (user 2026-10-01): crashed runs of earlier days
+    # left pending rows behind; a later scan prices ALL of the channel's
+    # pendings, and 'N scored' alone read as over-capture when N >> new
+    # calls in the window (Oliver: '8 scored' — 2 new, 6 backlog swept).
+    _ins = min(progress.inserted, len(pending))
+    _bl = max(0, len(pending) - _ins)
+    if _bl:
+        tail.insert(0, f"{_ins} new, {_bl} backlog from earlier runs")
     if unpriceable:
         tail.append(f"{unpriceable} not found")
     if birdeye_saved:
