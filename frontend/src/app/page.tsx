@@ -12,6 +12,7 @@ import { useUIStore } from "@/store/uiStore";
 import {
   useFetchStore,
   runRefreshStream,
+  runBootRefreshOnce,
   stopRefresh,
 } from "@/store/fetchStore";
 import { api, apiStrategy, ApiChannel, initialsAvatar } from "@/lib/api";
@@ -102,7 +103,7 @@ export default function HomePage() {
   // fetch the user starts meanwhile runs CONCURRENTLY: the server makes the
   // refresh's Telegram scans yield around it (never the other way).
   useEffect(() => {
-    void runRefreshStream().catch(() => {
+    void runBootRefreshOnce().catch(() => {
       /* surfaced via the feed panel's error line + toast on manual retry */
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps

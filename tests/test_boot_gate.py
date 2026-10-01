@@ -181,13 +181,17 @@ def test_refresh_stream_wired_to_gate():
     assert "BR.mark_boot_finished(gate_token, clean=not had_error)" in gen
 
 
-def test_refresh_skips_birdeye_but_fetch_allows():
-    """The earlier policy (Birdeye = initial fetch only) must survive this
-    refactor: refresh still passes birdeye_rescue=False."""
+def test_refresh_and_fetch_both_allow_birdeye_rescue():
+    """Policy ruling 2026-10-01 (user: 'fix that'): boot/refresh SCAN is
+    each new call's INITIAL scan — GT-blind fresh mints must be rescued by
+    Birdeye there, not left to rot in waiting_for_data until a manual
+    Fetch. The API-on-refresh ban lives on in the RESCORE lane (its
+    price_one_call call sites pass no allow_birdeye — default closed;
+    saved candles come from the token-primary cache)."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "api" / "server.py").read_text()
     refresh = src.split("async def _one_channel")[1].split("async def event_generator")[0]
-    assert "birdeye_rescue=False" in refresh
+    assert "birdeye_rescue=True" in refresh
 
 
 def test_zombie_run_rotates_instead_of_resuming(gate_env, monkeypatch):

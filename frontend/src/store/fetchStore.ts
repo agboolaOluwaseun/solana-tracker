@@ -366,6 +366,21 @@ export async function runRefreshStream(force = false): Promise<boolean> {
   return true;
 }
 
+/** Boot auto-refresh: at most ONE attempt per app load. Module state
+ * survives client-side navigation (deep-dive -> back does NOT remount JS),
+ * so page-to-page movement no longer re-fires the boot POST. Only a real
+ * reload (new tab, refresh, relaunch) retries — which is what 'on launch'
+ * should mean. (Previously the homepage effect fired on every remount:
+ * round-tripping from a channel deep-dive re-ran the stream; with the
+ * gate never closing on a permanently-broken channel that looked like
+ * 'rescoring finished, then started all over'.) */
+let bootAttemptedThisLoad = false;
+export async function runBootRefreshOnce(): Promise<boolean> {
+  if (bootAttemptedThisLoad) return false;
+  bootAttemptedThisLoad = true;
+  return runRefreshStream(false);
+}
+
 /** Dropdown fetch — starts IMMEDIATELY, even while a refresh is running. */
 export async function runFetchStream(
   channelIds: number[],

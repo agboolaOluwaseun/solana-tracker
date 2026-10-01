@@ -273,17 +273,32 @@ def test_run_backfill_default_closed():
     assert sig2.parameters["allow_birdeye"].default is False
 
 
-def test_refresh_stream_source_closed():
-    """Static guard: api/server.py's _one_channel (refresh) must pass
-    birdeye_rescue=False explicitly; fetch sites pass True."""
+def test_refresh_stream_source_open():
+    """Static guard for the 2026-10-01 policy ruling (user 'fix that'):
+    boot/refresh SCAN = each new call's initial scan, rescue ALLOWED —
+    a GT-blind fresh mint must not rot in waiting_for_data until the
+    user manually fetches. The API-never-on-refresh rule is carried by
+    the RESCORE lane instead: price_one_call default False, and the
+    rescore pass only passes allow_birdeye for rows whose 7d window is
+    STILL OPEN (first pricing); closed-window rows are finalizers and
+    read saved candles (token-primary cache), never the Birdeye API."""
     from pathlib import Path
     src = Path(__file__).resolve().parents[1] / "api" / "server.py"
     text = src.read_text()
     refresh = text.split("async def _one_channel")[1].split("async def")[0]
     fetch1 = text.split("async def _fetch_stream_inner")[1].split("async def")[0]
-    assert "birdeye_rescue=False" in refresh
+    assert "birdeye_rescue=True" in refresh
     assert "birdeye_rescue=True" in fetch1
-    assert "birdeye_rescue" not in refresh.replace("birdeye_rescue=False", "")
+    # rescore lane stays API-clean: its price_one_call call sites pass NO
+    # allow_birdeye at all (default False). Old rescued rows finalize from
+    # candles saved to the token-primary cache, never by re-querying Birdeye.
+    from pathlib import Path as P
+    pipe = P(__file__).resolve().parents[1] / "pipeline.py"
+    rescore = pipe.read_text().split("def _rescore_pass_once")[1].split("def _checkpoint")[0]
+    assert "allow_birdeye" not in rescore
+    # scan lane honors the parameter
+    scan = pipe.read_text().split("def run_backfill(")[1].split("def _checkpoint")[0]
+    assert "allow_birdeye=birdeye_rescue" in scan
 
 def test_apply_eval7d_adopts_rescued_chain(tmp_path, monkeypatch):
     """A rescued result's chain_corrected overwrites the stored tag; a

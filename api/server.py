@@ -802,7 +802,14 @@ async def refresh_stream(request: Request):
                             username=row["username"],
                             progress_cb=progress_cb,
                             opportunistic=opportunistic,
-                            birdeye_rescue=False,
+                            # boot/refresh SCAN = each new call's INITIAL
+                            # scan (user ruling 2026-10-01): GT-blind mints
+                            # (fresh pump.fun) rescue via Birdeye here. The
+                            # API-stays-off-the-refresh rule is honored by
+                            # the RESCORE lane (rescore_live_calls defaults
+                            # allow_birdeye=False, candle reads hit the
+                            # token-primary cache instead of Birdeye).
+                            birdeye_rescue=True,
                         )
                 except Exception as e:
                     return e
