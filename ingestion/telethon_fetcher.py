@@ -54,11 +54,25 @@ async def _resolve_entity(client: TelegramClient, channel: str):
 
 
 def build_client() -> TelegramClient:
-    """Construct an un-started TelegramClient."""
+    """Construct an un-started TelegramClient.
+
+    Bounded network behaviour (offline-hang fix, 2026-10-01): Telethon's
+    defaults are connection_retries=sys.maxsize with no per-request
+    timeout, so a network loss MID-SCAN never raises — the executor thread
+    reconnect-loops forever, the refresh stream can't finish, and every
+    pooled DB read behind it hangs: the homepage sat on 'Loading
+    channels…' with zero cards even after a server relaunch (a fresh boot
+    re-stuck on the same dead network). timeout= raises OSError/asyncio
+    errors instead, which the boot dispatch already treats correctly:
+    stage='error' -> channel not done, gate stays open for resume, scan
+    checkpoint never advances on a zero-message run (8f58b6e)."""
     return TelegramClient(
         _session_path(),
         int(settings.telegram_api_id),
         settings.telegram_api_hash,
+        request_retries=2,
+        connection_retries=2,
+        timeout=30,
     )
 
 
