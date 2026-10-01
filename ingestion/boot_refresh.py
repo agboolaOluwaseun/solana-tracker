@@ -106,6 +106,39 @@ def _row():
         ).fetchone()
 
 
+# Entity-resolution failures: THIS Telegram account cannot reach the channel
+# (left it, id stored wrong, made private, username died). No retry inside
+# the day's run can change that — only a human re-adding the channel can.
+# Everything else (network, FloodWait, session churn) is transient and keeps
+# the retry-every-boot semantics.
+_PERMANENT_SCAN_ERROR_PATTERNS = (
+    "could not find the input entity",   # bad/foreign channel id or left
+    "chatidinvalid",                     # wrong chat type / not visible
+    "invalid object id",                 # ChatIdInvalidError str() (Geppetto:
+                                         # 'Invalid object ID for a chat...' —
+                                         # the message carries NO class name)
+    "username_not_present",              # @username no longer exists
+    "usernamenotpresent",
+    "invitehashexpired",                 # joined-by-link, link dead
+    "channelprivate",                    # access revoked since join
+    "channel_private",
+)
+
+
+def is_permanent_scan_error(message: str | None) -> bool:
+    """True for scan failures a retry cannot fix (this account can't reach
+    the channel). Used by the refresh dispatch: a permanent failure marks
+    the channel done-for-the-run so the daily gate can still CLOSE — the
+    Geppetto loop (2026-10-01): one unreachable channel errored every run,
+    clean=False forever, finished_at stayed NULL, so every app open 'resumed'
+    the day-old run and replayed the full rescore, and the gate never
+    rotated fresh until the 24h zombie age passed."""
+    if not message:
+        return False
+    low = message.lower()
+    return any(p in low for p in _PERMANENT_SCAN_ERROR_PATTERNS)
+
+
 def _is_zombie(row) -> bool:
     """Unfinished run older than the daily interval: its per-channel done
     list is historical, not current — resuming it would silently skip

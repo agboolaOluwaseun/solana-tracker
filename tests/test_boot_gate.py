@@ -231,3 +231,35 @@ def test_running_age_distinguishes_inflight_from_complete(gate_env, monkeypatch)
     BR.mark_boot_finished(t)
     assert BR.running_age_s() is None                # closed
     assert BR.hours_since_last_finished() < 1/3600  # just completed
+
+
+GEPPETTO_REAL = ("fetch failed: ChatIdInvalidError: Invalid object ID for a "
+    "chat. Make sure to pass the right types, for instance making sure that "
+    "the request is designed for chats (not channels/megagroups) or otherwise "
+    "look for a different one more suited (caused by GetChatsRequest)")
+
+def test_permanent_scan_error_classification():
+    """Geppetto loop (2026-10-01): one unreachable channel vetoed the daily
+    gate close forever — every open resumed the run and replayed rescore."""
+    assert BR.is_permanent_scan_error(GEPPETTO_REAL)
+    assert BR.is_permanent_scan_error(
+        "fetch failed: ValueError: Could not find the input entity for "
+        "PeerChannel(channel_id=701473573202)")
+    assert BR.is_permanent_scan_error(
+        "fetch failed: UsernameNotPresentError: (error 190)")
+    # transient errors must stay retryable:
+    assert not BR.is_permanent_scan_error(
+        "fetch failed: ConnectionTimeout")
+    assert not BR.is_permanent_scan_error(
+        "fetch failed: FloodWaitError: 300 seconds")
+    assert not BR.is_permanent_scan_error(None)
+
+
+def test_unreachable_channel_does_not_veto_gate_close():
+    """Dispatch-level: 'unreachable' marks the channel done and does NOT
+    set had_error, so the run closes cleanly and tomorrow rotates fresh."""
+    src = open("api/server.py").read()
+    assert "BR.is_permanent_scan_error" in src
+    assert "out[0] = 'unreachable'" in src
+    assert 'out2[0] in (\'done\', \'unreachable\')' in src
+    assert "elif out[0] == 'error':\n                    had_error = True" in src

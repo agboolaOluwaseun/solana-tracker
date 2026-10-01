@@ -822,6 +822,13 @@ async def refresh_stream(request: Request):
             result = await task
 
             if isinstance(result, Exception):
+                msg = str(result)
+                if BR.is_permanent_scan_error(msg):
+                    # Account can't reach this channel — retrying is futile.
+                    # Surface honestly but let the run close (see loop note).
+                    out[0] = 'unreachable'
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'unreachable': True, 'message': f'channel unreachable by this Telegram account — needs re-join/relink: {msg[:140]}'})}\n\n"
+                    return
                 out[0] = 'error'
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
             elif getattr(result, 'stage', '') == 'yielded':
@@ -831,13 +838,21 @@ async def refresh_stream(request: Request):
                 out[0] = 'yielded'
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'progress', 'stage': 'yielded', 'message': 'paused — a fetch is using Telegram; will retry right after'})}\n\n"
             elif getattr(result, 'stage', '') == 'error':
-                # Offline boot / dead session (2026-09-30 incident): run_backfill
+                # offline boot / dead session (2026-09-30 incident): run_backfill
                 # returned a normal Progress with stage='error' — NOT an
                 # exception — so the old else-branch marked the channel DONE,
                 # the run 'cleanly' closed its 24h gate, and the next open said
                 # 'Already updated' over a day of never-scanned channels.
                 # Error = not done: the gate keeps finished_at NULL and the
-                # next boot resumes exactly this channel.
+                # next boot resumes exactly this channel. EXCEPT permanent
+                # entity-resolution failures (Geppetto loop, 2026-10-01):
+                # retry can't fix those — 'unreachable' falls through the
+                # dispatch to mark_channel_done without poisoning had_error.
+                _em = getattr(result, 'message', None) or 'scan failed'
+                if BR.is_permanent_scan_error(_em):
+                    out[0] = 'unreachable'
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'unreachable': True, 'message': f'channel unreachable by this Telegram account — needs re-join/relink: {_em[:140]}'})}\n\n"
+                    return
                 out[0] = 'error'
                 yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': getattr(result, 'message', None) or 'scan failed'})}\n\n"
             else:
@@ -878,9 +893,12 @@ async def refresh_stream(request: Request):
                 elif out[0] == 'error':
                     had_error = True
                 else:
-                    # done OR 'Already up to date' — either way this run
-                    # walked the channel fully; it won't need rescanning if
-                    # the boot run is interrupted right after.
+                    # done OR 'Already up to date' OR 'unreachable' — either
+                    # way this run walked the channel fully; it won't need
+                    # rescanning if the boot run is interrupted right after.
+                    # (unreachable = permanent entity failure: marking it
+                    # done is what lets the gate CLOSE despite one dead
+                    # channel; the next daily rotation retries it honestly.)
                     BR.mark_channel_done(gate_token, row["id"])
 
             # Retry lane: channels that paused for a user fetch get a second
@@ -904,7 +922,7 @@ async def refresh_stream(request: Request):
                         yield chunk
                     if out2[0] == 'error':
                         had_error = True
-                    elif out2[0] == 'done':
+                    elif out2[0] in ('done', 'unreachable'):
                         BR.mark_channel_done(gate_token, row["id"])
             
             # Before finishing: refresh every provisional 'live' verdict

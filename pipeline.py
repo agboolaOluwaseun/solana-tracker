@@ -1406,7 +1406,11 @@ def run_backfill(
             return progress
         log.exception("fetch failed for %s", channel_ref)
         progress.stage = "error"
-        progress.message = f"fetch failed: {e}"
+        # Class name included: permanent-vs-transient classification
+        # (boot_refresh.is_permanent_scan_error) keys on exception TYPE
+        # names (ChatIdInvalidError, UsernameNotPresentError) — str(e)
+        # alone carries none of them (verified in the Geppetto probe).
+        progress.message = f"fetch failed: {type(e).__name__}: {e}"
         progress_cb(progress)
         return progress
 
