@@ -26,9 +26,11 @@ export default function UpdateFeed({ onDismiss }: Props) {
   const skipped = useFetchStore((s) => s.refresh.skipped);
 
   const total = tasks.length;
-  const updated = tasks.filter(
-    (t) => t.status === "done" || t.status === "error",
-  ).length;
+  const nErr = tasks.filter((t) => t.status === "error").length;
+  // 'up to date' counts GENUINELY scanned channels — never errored ones.
+  // (An offline run errors every channel; the old counter included errors
+  // and the banner read "All channels up to date" over a failed run.)
+  const updated = tasks.filter((t) => t.status === "done").length;
 
   if ((feed.length === 0 && total === 0) || (!active && !allDone)) return null;
 
@@ -79,10 +81,23 @@ export default function UpdateFeed({ onDismiss }: Props) {
         {/* Status */}
         <div className="flex flex-shrink-0 items-center gap-2 font-semibold text-[var(--text-primary)]">
           {finished ? (
-            <>
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              <span className="text-emerald-400">All channels up to date</span>
-            </>
+            nErr > 0 ? (
+              /* An offline/failed run used to render this as 'All channels
+                 up to date' — errors counted as done in endRun. Say what
+                 happened: the run ENDED, but N channels did not update. */
+              <>
+                <X className="h-4 w-4 text-amber-400" />
+                <span className="text-amber-400">
+                  Update incomplete — {nErr} channel{nErr === 1 ? "" : "s"} failed
+                  (retry on next open)
+                </span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                <span className="text-emerald-400">All channels up to date</span>
+              </>
+            )
           ) : (
             <>
               <RefreshCw className="h-4 w-4 animate-spin text-[var(--accent-teal)]" />
