@@ -267,3 +267,22 @@ def test_unreachable_channel_does_not_veto_gate_close():
     assert "out[0] = 'unreachable'" in src
     assert 'out2[0] in (\'done\', \'unreachable\')' in src
     assert "elif out[0] == 'error':\n                    had_error = True" in src
+
+
+def test_transient_error_parks_channel_until_network_returns():
+    """User ruling 2026-10-02: an offline mid-run must NOT race the queue
+    firing per-channel errors — the refresh stays ON the channel that lost
+    the network, retrying (bounded 30-min budget), and auto-continues when
+    connectivity returns. Permanent failures return 'unreachable' (never
+    'error'), so everything parked is retryable by definition. Gate stays
+    open while parked (no done-mark before the wait ends), so closing the
+    tab resumes from exactly this channel — the durable half."""
+    from pathlib import Path
+    gen = (Path(__file__).resolve().parents[1] / "api" / "server.py").read_text()
+    assert "NET_RETRY_BUDGET_S = 1800" in gen
+    assert "while out[0] == 'error' and waited_s < NET_RETRY_BUDGET_S" in gen
+    assert "network down — waiting here, auto-retry" in gen
+    # the retry re-runs the SAME channel row, then falls through the normal
+    # done/error dispatch (had_error untouched on recovery -> gate can close)
+    assert "async for chunk in _one_channel(row, out, opportunistic=True)" in gen
+    assert gen.count("async for chunk in _one_channel(row, out, opportunistic=True)") == 2

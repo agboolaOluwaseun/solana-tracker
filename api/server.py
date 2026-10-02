@@ -891,10 +891,31 @@ async def refresh_stream(request: Request):
                 yield f"data: {json.dumps({'status': 'resumed', 'message': f'resuming interrupted refresh — {len(done_ids)} channel(s) already done, {len(remaining)} to go'})}\n\n"
             deferred = []
             had_error = False
+            # Transient-failure parking (user ruling 2026-10-02): when the
+            # network drops mid-run, the refresh must STAY on the channel it
+            # lost connection at and auto-continue when connectivity returns
+            # — not race through the queue firing errors. Permanent entity
+            # failures never reach 'error' (they return 'unreachable'), so
+            # anything parked here is retryable by definition. Bounded by a
+            # 30-min budget: past it, the error is reported honestly and the
+            # rest of the queue runs (they'll fail fast offline); the gate
+            # stays open either way, and the next app open resumes from
+            # exactly this channel — the durable half of 'auto-continue'
+            # that no in-session loop can cover (tab closed, machine off).
+            NET_RETRY_INTERVAL_S = 20
+            NET_RETRY_BUDGET_S = 1800
             for row in remaining:
                 out = [None]
                 async for chunk in _one_channel(row, out, opportunistic=True):
                     yield chunk
+                waited_s = 0
+                while out[0] == 'error' and waited_s < NET_RETRY_BUDGET_S:
+                    waited_s += NET_RETRY_INTERVAL_S
+                    yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'progress', 'stage': 'retry', 'message': f'network down — waiting here, auto-retry every {NET_RETRY_INTERVAL_S}s ({waited_s // 60 + 1}m waited)'})}\n\n"
+                    await asyncio.sleep(NET_RETRY_INTERVAL_S)
+                    out = [None]
+                    async for chunk in _one_channel(row, out, opportunistic=True):
+                        yield chunk
                 if out[0] == 'yielded':
                     deferred.append(row)
                 elif out[0] == 'error':
@@ -905,7 +926,10 @@ async def refresh_stream(request: Request):
                     # rescanning if the boot run is interrupted right after.
                     # (unreachable = permanent entity failure: marking it
                     # done is what lets the gate CLOSE despite one dead
-                    # channel; the next daily rotation retries it honestly.)
+                    # channel; the next daily rotation retries it honestly.
+                    # A parked channel that recovered arrives here too —
+                    # had_error was never touched, so the gate can close
+                    # clean once the queue finishes.)
                     BR.mark_channel_done(gate_token, row["id"])
 
             # Retry lane: channels that paused for a user fetch get a second
