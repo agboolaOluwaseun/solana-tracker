@@ -50,7 +50,24 @@ async def _lifespan(app):
         try:
             from pipeline import mature_pending_calls, rescore_live_calls
             mature_pending_calls()
-            rescore_live_calls()
+            # Visibility ruling (user 2026-10-06): when the daily boot
+            # refresh is still DUE, the stream about to open will run the
+            # live rescore WITH its progress counter — an invisible
+            # background pass holding the single-flight guard would make
+            # that phase flash by in ~0s (today: 117 live calls, user saw
+            # nothing). Only run the rescore here when no stream can claim
+            # it today: gate already closed (same-day server restart with
+            # the app not yet reopened) — then nobody's watching anyway and
+            # verdicts must still mature. The scan-locked work itself is
+            # unchanged; this only decides WHO runs it visibly.
+            try:
+                from ingestion import boot_refresh as BR
+                BR.ensure_gate_table()
+                due, _token = BR.boot_refresh_due()
+            except Exception:
+                due = False  # gate unreadable -> behave like the old path
+            if not due:
+                rescore_live_calls()
         except Exception:
             import logging
             logging.getLogger(__name__).exception("startup catch-up failed")

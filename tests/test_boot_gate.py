@@ -286,3 +286,21 @@ def test_transient_error_parks_channel_until_network_returns():
     # done/error dispatch (had_error untouched on recovery -> gate can close)
     assert "async for chunk in _one_channel(row, out, opportunistic=True)" in gen
     assert gen.count("async for chunk in _one_channel(row, out, opportunistic=True)") == 2
+
+
+def test_startup_rescore_defers_to_visible_stream():
+    """Visibility ruling (user 2026-10-06): the lifespan background catch-up
+    must NOT run rescore_live_calls while the daily boot refresh is still
+    DUE — the stream that's about to open narrates that exact pass with its
+    progress counter; an invisible holder of the single-flight guard makes
+    the visible phase flash by at 0/0. It still runs when the gate is
+    already closed (server restart after the day's scan — nobody watching,
+    verdicts must mature anyway)."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "api" / "server.py").read_text()
+    life = src.split("async def _lifespan")[1].split("_threading.Thread")[0]
+    assert "if not due:" in life
+    assert "rescore_live_calls()" in life.split("if not due:")[1]
+    assert "BR.boot_refresh_due()" in life
+    # mature_pending_calls stays unconditional (cheap DB pass, no counter)
+    assert "mature_pending_calls()" in life
