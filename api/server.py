@@ -627,13 +627,22 @@ async def _fetch_stream_inner(channel_ids, days, conn):
         # Start backfill in thread
         task = loop.run_in_executor(None, run_sync)
 
-        # Stream progress updates
+        # Stream progress updates. A quiet socket on a hidden/sleeping tab
+        # never breaks (2026-10-06: MadApes 3.5h fetch — card froze at 204
+        # while the server kept pricing to 461): emit an SSE comment every
+        # ~30s. Consumers ignore ': lines' per spec; Chrome reaps dead
+        # sockets on failed delivery instead of hanging them forever.
+        _hb = 0.0
         while not task.done():
             try:
                 update = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
                 yield f"data: {json.dumps(update)}\n\n"
+                _hb = 0.0
             except asyncio.TimeoutError:
-                continue
+                _hb += 0.5
+                if _hb >= 30.0:
+                    _hb = 0.0
+                    yield ": ping\n\n"
 
         # Get final result
         result = await task
