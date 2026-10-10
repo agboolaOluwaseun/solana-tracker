@@ -1989,9 +1989,22 @@ def run_backfill(
     #    addresses in this channel resolve to the same dex_pool_id (same token),
     #    the later one is an "update address" post — delete it (oldest wins).
     if dual_chain:
-        reconcile_by_resolved_identity(channel_id, chain="sol")
-        if any(r["chain"] == "robinhood" for r in pending):
-            reconcile_by_resolved_identity(channel_id, chain="robinhood")
+        # Partition over EVERY chain the channel actually holds — was hard-
+        # coded to sol+robinhood, so arc/eth/bsc/base identity duplicates
+        # never folded: wife ch41 logged the same UpSideDownCat (ticker
+        # literally 'USDC' — not the stablecoin) twice, Sep 16 mint post +
+        # Oct 8 dexscreener pool-link post, both chain='arc' (user report
+        # 2026-10-10). Same class already caught DB-wide: ch67 ALIENS (eth)
+        # and GMEOW (bsc) update posts. Chains are derived from the
+        # channel's rows, not assumed.
+        # derive from the CHANNEL's stored rows, not this pass's pending:
+        # the Oct-8 arc row folded the Sep-16 arc original precisely because
+        # both are rows of the channel even when only one prices this pass
+        _chains = {r["chain"] for r in conn.execute(
+            "SELECT DISTINCT chain FROM calls WHERE channel_id = ?",
+            (channel_id,)).fetchall()} or {"sol"}
+        for _c in sorted(_chains):
+            reconcile_by_resolved_identity(channel_id, chain=_c)
     else:
         reconcile_by_resolved_identity(channel_id)
 
