@@ -14,7 +14,7 @@ export default function ChannelDeepdivePage() {
   const { timeWindow, setTimeWindow, strategy, deepDiveChain } = useUIStore();
   const params = useParams();
   const handle = params?.handle as string;
-  const [activeTab, setActiveTab] = useState<"highest" | "recent">("highest");
+  const [activeTab, setActiveTab] = useState<"highest" | "recent">("recent");
 
   const [detail, setDetail] = useState<ApiDetail | null>(null);
   const [buckets, setBuckets] = useState<ApiBucket[]>([]);

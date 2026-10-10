@@ -27,7 +27,7 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  timeWindow: "all",
+  timeWindow: "1m",   // default window: last month (user 2026-10-10; was 'all')
   channelTab: "Consistent",
   strategy: "100",
   chain: "all",
