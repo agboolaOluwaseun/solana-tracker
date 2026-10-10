@@ -1,8 +1,25 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { CheckCircle2, Clock, Loader2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock, Loader2, XCircle } from "lucide-react";
 import type { FetchTask } from "@/store/fetchStore";
+
+/** Stale-progress detection (user ruling 2026-10-08): a running card that
+ * has received NO event for 2 minutes is almost certainly a dead browser-
+ * side SSE reader (MadApes: frozen at 204/461 for 90 min while the server
+ * priced to 461). Say so instead of staring at a confident-looking number.
+ * Re-checked every 10s; only while the task is actually running. */
+function useStaleSeconds(task: FetchTask): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (task.status !== "running") return;
+    const id = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(id);
+  }, [task.status]);
+  if (task.status !== "running") return 0;
+  return Math.max(0, Math.floor((now - task.lastEventAt) / 1000));
+}
 
 /**
  * Progress card shown in the grid while channels are being fetched.
@@ -15,6 +32,8 @@ export default function LoadingCard({ task }: { task: FetchTask }) {
   const queued = task.status === "queued";
   const done = task.status === "done";
   const error = task.status === "error";
+  const staleS = useStaleSeconds(task);
+  const stale = running && staleS >= 120;   // 2 min of silence while 'running'
 
   // Show the newest lines that fit; the tail is what's happening NOW.
   const visible = task.log.slice(-4);
@@ -50,14 +69,27 @@ export default function LoadingCard({ task }: { task: FetchTask }) {
               ? "bg-[var(--accent-teal-dim)] text-[var(--accent-teal)]"
               : error
               ? "bg-red-500/15 text-red-400"
+              : stale
+              ? "bg-amber-500/15 text-amber-400"
               : running
               ? "bg-[var(--accent-gold-dim)] text-[var(--accent-gold)]"
               : "bg-white/5 text-[var(--text-muted)]"
           }`}
         >
-          {done ? "Done" : error ? "Failed" : running ? "Running" : "Queued"}
+          {done ? "Done" : error ? "Failed" : stale ? "No updates 2m" : running ? "Running" : "Queued"}
         </span>
       </div>
+
+      {/* Stale hint: server may still be pricing — this is the browser's
+          view going quiet, not necessarily the work (callercrosschain
+          2026-10-09: UI stuck at 51/186 while the server finished 111). */}
+      {stale && (
+        <p className="mb-1 flex items-center justify-center gap-1.5 text-center text-[10px] text-amber-400/80">
+          <AlertTriangle className="h-3 w-3 flex-shrink-0" />
+          connection quiet — refresh the page if this is stuck; the server
+          keeps pricing in the background either way
+        </p>
+      )}
 
       {/* Title */}
       <h3 className="mb-2 truncate text-center text-lg font-semibold text-[var(--text-primary)]">

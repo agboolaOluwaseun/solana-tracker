@@ -56,6 +56,10 @@ export interface FetchTask {
   log: string[];
   /** Last message appended (dedupe consecutive identical stage lines). */
   lastMessage: string;
+  /** ms epoch of the last SSE event touching this task — drives the
+   * stale-progress badge (MadApes 2026-10-06: card froze at 204/461 for
+   * 90 min on a dead browser-side reader while the server priced to 461). */
+  lastEventAt: number;
 }
 
 interface RunState {
@@ -109,6 +113,7 @@ function blankTask(it: { channel_id: number; title: string }): FetchTask {
     total_calls: 0,
     log: [],
     lastMessage: "",
+    lastEventAt: Date.now(),
   };
 }
 
@@ -226,7 +231,7 @@ function applyEventFor(prev: RunState, kind: RunKind, data: SseEvent): RunState 
   }
   if (idx === -1) return prev;
 
-  let t = { ...tasks[idx] };
+  let t = { ...tasks[idx], lastEventAt: Date.now() };
   if (data.title) t.title = data.title;
 
   // Bottom-panel narration: refresh runs mirror every channel-tagged
