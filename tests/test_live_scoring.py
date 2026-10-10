@@ -626,3 +626,26 @@ def test_backlog_priced_is_announced_not_counted_as_found(live_env):
     assert prog.priced == 1
     assert "1 backlog from earlier runs" in prog.message
     assert "0 new" in prog.message
+
+
+def test_rescore_never_demotes_decided_row_over_refusal(live_env):
+    """Day-7 landmine guard (PLAGUE/SIF, user 2026-10-08): a live WIN whose
+    engine pass comes back 'waiting' (refused curve — seat=0, no usable
+    cached series) must keep its verdict and go final, never laundered into
+    unpriceable_loss. Pending rows still finalize to unpriceable per spec."""
+    db_path, pipeline, ctrl, seed = live_env
+    now = datetime.utcnow().replace(microsecond=0)
+    call_ts = now - timedelta(days=8)          # window CLOSED
+    cid = seed(SOL, call_ts)
+    conn = pipeline.get_connection()
+    # give it a decided win verdict, live state (what a rescue produced)
+    conn.execute("UPDATE calls SET status='win', score_state='live', "
+                 "peak_multiple=3.2 WHERE id=?", (cid,))
+    conn.commit()
+    # engine now REFUSES the curve: unpriceable + waiting
+    ctrl["next"] = {"*": lambda now, call_ts: _pair(
+        "unpriceable_loss", complete=False, note="orientation ambiguous")}
+    n = pipeline.rescore_live_calls()
+    row = _q(db_path, "SELECT status, score_state FROM calls")[0]
+    assert row["status"] == "win"              # verdict survives
+    assert row["score_state"] == "final"       # leaves the live set

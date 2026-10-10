@@ -263,3 +263,100 @@ def test_guard_disabled_via_config(dispatch_env, monkeypatch):
     # POOL_GUARD=false => old behavior restored (scores the curve regardless)
     assert r7.note != "orientation ambiguous"
     assert ctrl["scored_pools"]
+
+# ---- PLAGUE/SIF sub-case: null price_usd is itself the flip signal -------
+# (user 2026-10-08: DexScreener answers priceUsd for the QUERIED address;
+# null => the token sits in the quote seat of a token/token pair and GT
+# would serve the OTHER asset's curve. The exotic-quote tripwire saw
+# quote_symbol='' — no signal — and let the inverted pair through: PLAGUE
+# scored on the PFE curve (fake 1.0x loss on a 3.25x win), SIF on DJT
+# (1.03x loss on an 11.2x win). A missing price for the called token IS
+# the flip signal: pay the one cached seat-listing call.)
+
+def test_null_price_fires_seat_confirm_and_reseats(dispatch_env):
+    pipeline, ctrl = dispatch_env
+    ctrl["pool_info"] = _pool(quote_symbol=None, price_usd=None)
+    ctrl["confirm"] = (False, [{"pool_address": BASE_POOL, "reserve_usd": 20000,
+                                "name": "PLAGUE / SOL", "quote_symbol": "SOL"}])
+    result, sl, r7 = pipeline.price_one_call(
+        "sol", None, MUSEIC, T0, now=T0 + timedelta(hours=2),
+        allow_birdeye=False)
+    assert ctrl["listing_calls"] == 1                  # the new tripwire fired
+    assert ctrl["scored_pools"] and ctrl["scored_pools"][0] == BASE_POOL
+    assert any(u.get("pool_is_base") == 1 for u in ctrl["ups"])
+
+
+def test_null_price_no_base_pool_refused_then_rescued(dispatch_env):
+    from pricing.strategy7d import Eval7dResult
+    pipeline, ctrl = dispatch_env
+    ctrl["pool_info"] = _pool(quote_symbol=None, price_usd=None)
+    ctrl["confirm"] = (False, [])                      # seat = quote, no cand
+    rescued = Eval7dResult(status_plain="win", status_stoploss="win",
+                           entry_price_usd=6.0e-5, max_multiple=3.25,
+                           note="2x (birdeye solana)")
+    ctrl["rescued"] = rescued
+    result, sl, r7 = pipeline.price_one_call(
+        "sol", None, MUSEIC, T0, now=T0 + timedelta(hours=2),
+        allow_birdeye=True)
+    assert ctrl["listing_calls"] == 1
+    assert ctrl["scored_pools"] == []                  # the wrong curve NEVER scored
+    assert r7 is rescued                               # Birdeye cascade (b) — PLAGUE's path
+
+# ---- 'going forward' metadata rules (user 2026-10-08, PLAGUE/SIF era) ----
+# Fresh resolutions now carry _fresh_resolve + DS's free seat metadata; the
+# guard decides from data we ALREADY paid for. Legacy cached rows must keep
+# the old fail-open behavior byte-identically (no retroactive wave).
+
+def test_fresh_null_quote_stamps_flip_without_listing(dispatch_env):
+    """User rule: fresh DS answer, pair with NO quote token named = mismatch.
+    0 extra API: straight to refuse -> Birdeye cascade (PLAGUE's scan shape)."""
+    from pricing.strategy7d import Eval7dResult
+    pipeline, ctrl = dispatch_env
+    ctrl["pool_info"] = _pool(quote_symbol=None, price_usd="1.0",
+                              _fresh_resolve=True)
+    rescued = Eval7dResult(status_plain="win", status_stoploss="win",
+                           entry_price_usd=6e-5, max_multiple=3.25,
+                           note="2x (birdeye solana)")
+    ctrl["rescued"] = rescued
+    _res, _sl, r7 = pipeline.price_one_call(
+        "robinhood", None, MUSEIC, T0, now=T0 + timedelta(hours=2),
+        allow_birdeye=True)
+    assert ctrl["listing_calls"] == 0                # ZERO extra API
+    assert ctrl["scored_pools"] == []               # wrong curve never scored
+    assert r7 is rescued
+    assert any(u.get("pool_is_base") == 0 for u in ctrl["ups"])
+
+def test_fresh_base_address_mismatch_proven_flip(dispatch_env):
+    """The cheapest possible catch (zero API): DS's own baseToken.address
+    != queried mint (and its re-seat loop found no >=$1k base pair — the
+    resolver prefers one if it exists). Metadata we already paid for IS the
+    evidence; flip is stamped directly."""
+    from pricing.strategy7d import Eval7dResult
+    pipeline, ctrl = dispatch_env
+    ctrl["pool_info"] = _pool(quote_symbol="SOL", price_usd="1.0",
+                              _fresh_resolve=True, base_token_address=META)
+    rescued = Eval7dResult(status_plain="win", status_stoploss="win",
+                           entry_price_usd=6e-5, max_multiple=2.2,
+                           note="2x (birdeye solana)")
+    ctrl["rescued"] = rescued
+    _res, _sl, r7 = pipeline.price_one_call(
+        "robinhood", None, MUSEIC, T0, now=T0 + timedelta(hours=2),
+        allow_birdeye=True)
+    assert ctrl["listing_calls"] == 0
+    assert ctrl["scored_pools"] == []
+    assert r7 is rescued
+
+def test_legacy_row_no_fresh_flag_never_rejudged(dispatch_env):
+    """The 1,954 legacy NULL-quote rows must NOT be retroactively stamped:
+    without _fresh_resolve they take the old fail-open path (score), exactly
+    as before this change — the non-destructive rule."""
+    pipeline, ctrl = dispatch_env
+    legacy = _pool(quote_symbol=None)
+    legacy.pop("price_usd")                          # get_cached_pool rows
+    ctrl["pool_info"] = legacy                       # never carry this key
+    result, sl, r7 = pipeline.price_one_call(
+        "robinhood", None, MUSEIC, T0, now=T0 + timedelta(hours=2),
+        allow_birdeye=False)
+    assert ctrl["listing_calls"] == 0
+    assert r7.note != "orientation ambiguous"        # NOT refused: scored
+    assert ctrl["scored_pools"] == [FLIP_POOL]       # straight through

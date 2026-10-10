@@ -115,7 +115,19 @@ class DexScreenerClient:
         chain_pairs.sort(
             key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, reverse=True
         )
-        best = chain_pairs[0]
+        # FREE re-seat (2026-10-08 'going forward' ruling): the response
+        # already lists EVERY pair containing this mint. If one where the
+        # mint IS the base seat carries >= $1k liquidity, prefer it — the
+        # curve provenance is then certain with zero extra requests, even
+        # though another pair has more raw liquidity.
+        want = token_address.lower()
+        pick = best = chain_pairs[0]
+        for p in chain_pairs:
+            if ((p.get("baseToken") or {}).get("address") or "").lower() == want \
+                    and ((p.get("liquidity") or {}).get("usd") or 0) >= 1000:
+                pick = p
+                break
+        best = pick
         pool_address = best.get("pairAddress")
         if not pool_address:
             return None
@@ -134,6 +146,11 @@ class DexScreenerClient:
             # and the token's own quoted USD price, both free in this response
             "quote_symbol": (best.get("quoteToken") or {}).get("symbol"),
             "price_usd": best.get("priceUsd"),
+            # FREE seat metadata (user ruling 2026-10-08 'going forward'):
+            # DS answers the pair's base-side ADDRESS. GT's curve follows the
+            # same seat convention, so mint != base address is a PROVEN flip
+            # — catchable with zero extra requests (the museic shape).
+            "base_token_address": base.get("address"),
         }
 
     def resolve_by_pool(self, pair_address: str, chain: str = "solana") -> Optional[dict]:

@@ -454,6 +454,23 @@ def _rescore_pass_once(progress_cb: ProgressCb, limit: Optional[int]) -> int:
         elif state == "waiting":
             # window closed while we waited — finalize the spec's
             # unpriceable_loss verdict now that "no data after 7d" is a fact.
+            # BUT never over a row that already carries a DECIDED verdict:
+            # a flipped-pool row (pool_is_base=0) is REFUSED by the engine
+            # lane (no data from the wrong curve is honest), while the
+            # Birdeye rescue that priced it saved its series to cache. An
+            # unpriceable walk must not launder a stored win/loss into a
+            # fake loss at day-7 — that was the PLAGUE/SIF finalization
+            # landmine (user ruling 2026-10-08). Pending rows (no verdict
+            # yet) still finalize to unpriceable_loss per the frozen spec.
+            cur_status = conn.execute(
+                "SELECT status FROM calls WHERE id = ?", (row["id"],)).fetchone()
+            if cur_status is not None and cur_status["status"] in ("win", "loss"):
+                # keep the decided verdict, just mark it final so it leaves
+                # the live set (window IS closed; refusing is not "waiting")
+                with transaction() as tc:
+                    tc.execute("UPDATE calls SET score_state='final' "
+                               "WHERE id = ?", (row["id"],))
+                continue
             apply_eval7d(row["id"], r7)
             persist_stoploss_result(row["id"], sl_result)
         else:
@@ -1173,6 +1190,75 @@ def mark_waiting_7d(call_id: int) -> None:
         )
 
 
+def _birdeye_from_cache(token_address: str, chain: str, call_ts,
+                        now=None, eval_days: Optional[int] = None):
+    """Cache-only re-walk of a Birdeye-saved series (rescore lane).
+
+    The seat=0 class (PLAGUE/SIF, museic fallbacks): the wrong GT curve can
+    never be scored and the Birdeye API may not be called on refresh — but
+    the rescue that decided the original verdict SAVED its raw hourly/minute
+    series into the token-primary cache. This reads only local rows, runs
+    them through the same read-time wick filter, and re-judges with the pure
+    engine — so a flipped-pool call finalizes at day-7 on the curve it was
+    priced on, with zero API requests. Returns None (caller falls back to
+    the refuse/waiting semantics) unless enough candles cover the window.
+    """
+    try:
+        import sqlite3
+        from pricing.cache import load_candles
+        from pricing.wick_filter import repair_hourly
+        from pricing.strategy7d import evaluate_call_7d
+
+        days = eval_days or settings.eval_days
+        end7 = call_ts + timedelta(days=days)
+        eff_end = min(now, end7) if now is not None else end7
+        hourly = load_candles(token_address, "hour",
+                              call_ts - timedelta(hours=1),
+                              end7 + timedelta(hours=1), chain=chain)
+        if len(hourly) < 12:          # a 7d window with <12h of bars is
+            return None               # not a curve — refuse, don't guess
+        minutes = load_candles(token_address, "minute",
+                               call_ts - timedelta(hours=1),
+                               end7 + timedelta(hours=1), chain=chain)
+
+        minute_by_hour: dict = {}
+        for mp in minutes:
+            minute_by_hour.setdefault(
+                mp.timestamp.replace(minute=0, second=0, microsecond=0),
+                []).append(mp)
+
+        def _mins(a, b):
+            out = []
+            t = a.replace(minute=0, second=0, microsecond=0)
+            while t <= b:
+                out.extend(minute_by_hour.get(t, []))
+                t += timedelta(hours=1)
+            return [p for p in out if a <= p.timestamp <= b]
+
+        try:
+            repaired, _extra = repair_hourly(hourly, _mins)
+        except Exception:  # noqa: BLE001 — filter never breaks pricing
+            repaired = hourly
+
+        def fetch_hourly(pool, token, start, end):
+            return [p for p in repaired if start <= p.timestamp <= end], 0
+
+        def fetch_minute(pool, token, start, end):
+            return _mins(start, end), 0
+
+        r = evaluate_call_7d(
+            token_address, token_address, call_ts, fetch_hourly, fetch_minute,
+            eval_days=days,
+            entry_grace_minutes=settings.entry_grace_minutes, now=now)
+        if r.note == "orientation ambiguous" or r.status_plain == "unpriceable_loss":
+            return None
+        # trail walker consumes the hourly backbone (same series normal/SL
+        # were judged on), minutes only feed the wick filter
+        return r, repaired
+    except Exception:  # noqa: BLE001 — cache lane is opportunistic
+        return None
+
+
 def price_one_call(chain: str, client, token_address: str, call_ts,
                    now: Optional[datetime] = None,
                    allow_birdeye: bool = False):
@@ -1219,12 +1305,37 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
             except Exception:  # noqa: BLE001
                 resolved = None
         if resolved and resolved.get("pool_address"):
+            quote_sym = resolved.get("quote_symbol")
+            if quote_sym is None and chain == "sol" and resolved.get("name"):
+                # GT fallback path: attrs.name IS GT's own 'BASE / QUOTE'
+                # string — the seat ordering we're about to price from, free.
+                _np = [p.strip() for p in str(resolved["name"]).split("/")]
+                quote_sym = _np[1] if len(_np) == 2 else None
             pool_info = {
                 "token_address": resolved.get("token_address") or token_address,
                 "pool_address": resolved["pool_address"],
                 "symbol": resolved.get("symbol"),
                 "name": resolved.get("name"),
                 "liquidity_usd": resolved.get("liquidity_usd"),
+                # Plumbing fix (2026-10-08, PLAGUE/SIF post-mortem): the
+                # constructor used to DROP quote_symbol/price_usd that
+                # resolve_pool had already fetched — every first-scan row
+                # stored quote_symbol=NULL, so the exotic-quote tripwire
+                # (is_exotic_quote(None) = 'no signal, don't flag') NEVER
+                # fired in production. Copy them through: the guard's free
+                # metadata finally has its inputs. _fresh_resolve marks DS's
+                # answer so a NULL quote can mean 'DS said nothing' (thin
+                # pair) vs legacy rows where NULL just means 'column was
+                # never written' — those must NOT be re-judged.
+                "quote_symbol": quote_sym,
+                "price_usd": resolved.get("price_usd"),
+                # DS's OWN base-seat address for the chosen pair — with the
+                # resolver's free re-seat preference, a mismatch here means
+                # NO base-seat pair >= $1k existed in the response: the flip
+                # is proven by metadata we already paid for (zero extra
+                # requests). pool_guard's GT listing then adds nothing.
+                "base_token_address": resolved.get("base_token_address"),
+                "_fresh_resolve": True,
             }
             upsert_token_meta(pool_info, chain=chain)
             # When the QUERY was itself a pool key (dexscreener/geckoterminal
@@ -1262,7 +1373,89 @@ def price_one_call(chain: str, client, token_address: str, call_ts,
         ext = _DS_CHAIN.get(chain, chain)
         seat = pool_info.get("pool_is_base")       # None | 0 | 1
         if seat == 0:
+            # Flip confirmed earlier: the GT curve is another asset — never
+            # score it. But don't just refuse-and-wait forever: the rescue
+            # that first priced this token SAVED its Birdeye series into the
+            # token-primary cache, so a LOCAL re-walk (zero API) re-judges
+            # it every pass — the fetch-only Birdeye policy is respected
+            # because nothing is fetched. Falls back to the old refuse/wait
+            # when no usable saved series exists.
+            cached = _birdeye_from_cache(token_address, chain, call_ts, now=now)
+            if cached is not None:
+                r, _series = cached
+                if r.status_plain in ("win", "loss"):
+                    # Trail rides the SAME saved series (rescue's own walker)
+                    from pricing.birdeye_rescue import _trail_from_series
+                    r.trailing_verdict = _trail_from_series(r, _series, call_ts)
+                    result, sl = eval7d_to_legacy_pair(r)
+                    return result, sl, r
+                # walk produced no honest verdict: refuse as before
             guard = "flipped"                      # cached verdict: don't score
+        elif (seat is None and pool_info.get("_fresh_resolve")
+              and pool_info.get("base_token_address")
+              and pool_info["base_token_address"].lower()
+                  != token_address.lower()):
+            # PRIMARY flip signal (user 'least API, metadata going forward'
+            # 2026-10-08): the resolver already preferred any pair where the
+            # mint IS the base seat with >= $1k liquidity — reaching here
+            # with a different base address PROVES no such healthy pair
+            # exists (PLAGUE/SIF shape). Stamp the flip and hand it to the
+            # Birdeye cascade: ZERO extra API requests, ever (the stamp
+            # short-circuits every later pass, which reads the saved
+            # series locally).
+            pool_info = {**pool_info, "pool_is_base": 0}
+            upsert_token_meta(pool_info, chain=chain)
+            log.info("pool_guard: %s proven non-base of %s (DS seat metadata)",
+                     token_address[:10], pool_info["pool_address"][:14])
+            guard = "flipped"
+        elif (seat is None and pool_info.get("_fresh_resolve")
+              and not pool_info.get("quote_symbol")):
+            # NULL-handling rule (user 2026-10-08): when DexScreener has
+            # just answered a pool and gives NO quote token for the pair,
+            # treat it as a mismatch outright — the pair is thin/weird and
+            # GT's curve provenance is unknown. Every studied case of this
+            # shape (PLAGUE/SIF at scan time) had no healthy GT base pool
+            # anyway, so paying a seat-listing to learn it is pointless:
+            # refuse now, Birdeye (address-keyed, seat-immune) prices it on
+            # this initial scan. 0 new API calls. pool_is_base=0 persists
+            # so every later pass short-circuits before touching GT hourly.
+            # Legacy cached rows lack _fresh_resolve and keep the old
+            # fail-open behavior — no retroactive wave over the 1,954
+            # historical NULL-quote rows.
+            pool_info = {**pool_info, "pool_is_base": 0}
+            upsert_token_meta(pool_info, chain=chain)
+            guard = "flipped"
+        elif (seat is None and "price_usd" in pool_info
+              and pool_info["price_usd"] is None):
+            # PLAGUE/SIF blind spot (user 2026-10-08): DexScreener's token
+            # endpoint answers priceUsd for the QUERIED address — null means
+            # the token is not this pair's base, i.e. GT would serve the
+            # other asset's curve. The exotic-quote tripwire saw
+            # quote_symbol='' (the paired side's ticker itself was missing)
+            # and treated 'no signal' as safe — the inverted pair sailed
+            # through and printed fake losses on 3x/11x wins. A missing
+            # price for the called token IS the flip signal.
+            is_base, cands = pool_guard.confirm_seats(
+                _get_v2_client(chain), token_address, pool_info["pool_address"])
+            if is_base is None:
+                pass                               # listing failed -> old behavior
+            elif is_base:
+                pool_info = {**pool_info, "pool_is_base": 1}
+                upsert_token_meta(pool_info, chain=chain)
+            elif cands:
+                base = cands[0]
+                pool_info = {**pool_info,
+                             "pool_address": base["pool_address"],
+                             "liquidity_usd": base["reserve_usd"],
+                             "pool_is_base": 1}
+                upsert_token_meta(pool_info, chain=chain)
+                log.info("pool_guard: %s re-seated via price-signal %s (%s, $%s reserve)",
+                         token_address[:10], base["pool_address"][:14],
+                         base["name"], int(base["reserve_usd"]))
+            else:
+                pool_info = {**pool_info, "pool_is_base": 0}
+                upsert_token_meta(pool_info, chain=chain)
+                guard = "flipped"
         elif seat is None and pool_guard.is_exotic_quote(
                 ext, pool_info.get("quote_symbol")):
             is_base, cands = pool_guard.confirm_seats(
