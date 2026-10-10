@@ -308,6 +308,11 @@ const controllers: Record<RunKind, AbortController | null> = {
   refresh: null,
 };
 
+/* Fetch-stream reconnect (user 2026-10-10 'frontend never lags behind'):
+ * capped per page load so a down server can't make the tab loop. */
+const MAX_FETCH_RECONNECTS = 3;
+let fetchReconnectAttempts = 0;
+
 /** Open a stream for one kind. Only the SAME kind's previous stream is
  * aborted (a second dropdown fetch replaces the first); the other kind keeps
  * running untouched — the server arbitrates Telegram access. */
@@ -335,6 +340,7 @@ async function runStream(
       // Refresh's queue event carries the item list the client didn't seed.
       useFetchStore.getState().applyEvent(kind, data);
     });
+    if (kind === "fetch") resetFetchReconnect();   // clean finish = fresh budget
   } catch (err) {
     if (controllers[kind] === myController && err instanceof Error && err.name !== "AbortError") {
       if (kind === "refresh") {
@@ -347,6 +353,30 @@ async function runStream(
             ].slice(-MAX_FEED),
           },
         }));
+      }
+      if (kind === "fetch" && fetchReconnectAttempts < MAX_FETCH_RECONNECTS) {
+        // Reader died mid-fetch (proxy hiccup, tab sleep, wifi drop): the
+        // server kept the work AND fetch_queue kept the channel. Re-attach
+        // shortly; the queue is authoritative about what is still pending.
+        fetchReconnectAttempts += 1;
+        const delay = 3000 * fetchReconnectAttempts;
+        setTimeout(() => {
+          void (async () => {
+            try {
+              const pend = await fetch(`${API_BASE}/api/pending-fetches`).then((r) =>
+                r.ok ? (r.json() as Promise<{ channel_id: number; title: string }[]>) : [],
+              );
+              if (pend.length > 0 && !controllers.fetch) {
+                await runFetchStream(
+                  pend.map((p) => p.channel_id),
+                  pend,
+                );
+              }
+            } catch {
+              /* next attempt or the stale badge cover it */
+            }
+          })();
+        }, delay);
       }
       throw err;
     }
@@ -383,6 +413,27 @@ let bootAttemptedThisLoad = false;
 export async function runBootRefreshOnce(): Promise<boolean> {
   if (bootAttemptedThisLoad) return false;
   bootAttemptedThisLoad = true;
+  // Interrupted-fetch resume goes FIRST (user rule 2026-10-10): pending
+  // queue items are re-streamed so their cards spin again exactly like a
+  // fresh fetch (the scan re-walks cheaply — stored rows are skipped —
+  // and pricing picks up exactly the still-pending calls = 'from where it
+  // stopped'); only after that finishes does the usual daily refresh run.
+  try {
+    const res = await fetch(`${API_BASE}/api/pending-fetches`);
+    if (res.ok) {
+      const pend = (await res.json()) as
+        Array<{ channel_id: number; title: string; days?: number | null }>;
+      if (Array.isArray(pend) && pend.length > 0) {
+        await runFetchStream(
+          pend.map((p) => p.channel_id),
+          pend.map((p) => ({ channel_id: p.channel_id, title: p.title })),
+          pend[0].days ?? undefined,
+        );
+      }
+    }
+  } catch {
+    /* server down — the refresh attempt below surfaces the real error */
+  }
   return runRefreshStream(false);
 }
 
@@ -390,14 +441,23 @@ export async function runBootRefreshOnce(): Promise<boolean> {
 export async function runFetchStream(
   channelIds: number[],
   items: { channel_id: number; title: string }[],
+  days?: number,
 ): Promise<void> {
-  await runStream("fetch", "/api/fetch-stream", { channel_ids: channelIds }, items);
+  await runStream("fetch", "/api/fetch-stream",
+    { channel_ids: channelIds, ...(days ? { days } : {}) }, items);
 }
 
 /** User dismissed the panel mid-refresh: stop ONLY the refresh stream.
  * We deliberately do NOT null the controller here — the stream's own
  * finally block (which fires when the abort propagates) still recognizes
  * itself as the owner and runs endRun, so `active` can never get stuck. */
+/** Called by runStream when a fetch run completed cleanly — resets the
+ * reconnect budget so a later genuine hiccup in the same tab still gets
+ * its retries. */
+function resetFetchReconnect() {
+  fetchReconnectAttempts = 0;
+}
+
 export function stopRefresh() {
   controllers.refresh?.abort();
 }

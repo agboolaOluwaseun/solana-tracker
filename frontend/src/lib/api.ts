@@ -149,6 +149,8 @@ export const api = {
     ),
   fetch: (channelIds: number[], days?: number) =>
     post<{ success: boolean; results: Array<{ channel_id: number; success: boolean; message: string }> }>("/api/fetch", { channel_ids: channelIds, ...(days ? { days } : {}) }),
+  pendingFetches: () =>
+    get<Array<{ channel_id: number; title: string }> >("/api/pending-fetches"),
 };
 
 /** AI chat envelope. success:false + error kind is an EXPECTED outcome

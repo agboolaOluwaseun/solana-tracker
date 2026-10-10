@@ -304,3 +304,29 @@ def test_startup_rescore_defers_to_visible_stream():
     assert "BR.boot_refresh_due()" in life
     # mature_pending_calls stays unconditional (cheap DB pass, no counter)
     assert "mature_pending_calls()" in life
+
+
+def test_interrupted_fetch_queue_resume():
+    """User rule 2026-10-10: a fetch interrupted mid-stream (client gone,
+    server restart) must RESUME as visible cards before the usual startup
+    update. Server contract: queue rows registered at stream start; the
+    endpoint lists them; rows are consumed per-channel as their turn
+    starts; headless fallback replays only rows older than 10 min so a
+    reopening frontend never double-runs a fresh one."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "api" / "server.py").read_text()
+    assert "INSERT OR REPLACE INTO fetch_queue" in src
+    assert "CREATE TABLE IF NOT EXISTS fetch_queue" in (Path(__file__).resolve().parents[1] / "db.py").read_text()
+    # endpoint + route
+    assert "/api/pending-fetches" in src
+    assert "Route(\"/api/pending-fetches\", pending_fetches)" in src
+    # stream registers the whole list up front, consumes per-channel start
+    assert "_fetch_queue_add(_r[\"id\"], days)" in src
+    assert "_fetch_queue_drop(row[\"id\"])" in src
+    # lifespan headless fallback (stale rows only) before startup catch-up
+    life = src.split("async def _lifespan")[1].split("_threading.Thread")[0]
+    assert "resume_fetch_queue_sync(max_age_minutes=10)" in life
+    assert "mature_pending_calls()" in life
+    # resume outranks the refresh (yield flag) like a user fetch
+    helper_src = src.split("def resume_fetch_queue_sync")[1].split("def resume")[0] if "def resume_fetch_queue_sync" in src else ""
+    assert "request_telegram_yield(True)" in helper_src
