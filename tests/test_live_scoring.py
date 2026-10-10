@@ -649,3 +649,98 @@ def test_rescore_never_demotes_decided_row_over_refusal(live_env):
     row = _q(db_path, "SELECT status, score_state FROM calls")[0]
     assert row["status"] == "win"              # verdict survives
     assert row["score_state"] == "final"       # leaves the live set
+
+
+def test_chain_collision_no_longer_aborts_pricing():
+    """thecallercrosschain 2026-10-10: a Birdeye rescue correcting a row's
+    chain onto an identity that ALREADY has a row (re-run inserted the twin
+    under the wrong tag first) made apply_eval7d's `chain = COALESCE(?)`
+    UPDATE hit UNIQUE(channel_id, chain, message_id, token_address) — the
+    IntegrityError aborted the WHOLE pricing loop mid-channel (ch68 froze
+    at call #51/186; my resume replay reproduced it on the same data).
+    The guard moves the verdict to the true-identity row and drops the
+    mis-tagged duplicates instead of crashing."""
+    import pipeline
+    conn = pipeline.get_connection()
+    conn.execute("INSERT INTO channels (id, telegram_channel_id, username,"
+                 " title, window_start, window_end) VALUES (88, 9988,"
+                 " 'col-test', 't', '2026-09-01T00:00:00', '2026-10-10T00:00:00')")
+    conn.commit()
+    def add(cid, chain, status="pending", sym=None, peak=None):
+        cur = conn.execute("""INSERT INTO calls (id, channel_id, chain, message_id,
+            raw_text, token_address, token_symbol, call_timestamp, status, is_win)
+            VALUES (?, 88, ?, 7, 'x', 'MINTAA', ?, '2026-10-01T00:00:00', ?, 0)""",
+            (cid, chain, sym, status))
+        return cur.lastrowid
+    # true identity exists and is decided (eth row with a verdict)
+    true_id = add(501, "eth", status="loss", sym="X")
+    conn.execute("UPDATE calls SET peak_multiple=0.5 WHERE id=?", (true_id,))
+    conn.commit()
+    # mis-tagged twin (rescue will correct it onto eth -> collision before fix)
+    wrong_id = add(502, "robinhood")
+    conn.commit()
+
+    from pricing.strategy7d import Eval7dResult
+    r7 = Eval7dResult(status_plain="win", status_stoploss="win",
+                      entry_price_usd=1e-5, max_price_usd=3e-5,
+                      max_multiple=3.0, pool_address="POOLX",
+                      note="2x (birdeye eth)", window_complete=True,
+                      evaluation_end_timestamp=None,
+                      chain_corrected="eth")
+    pipeline.apply_eval7d(wrong_id, r7)          # must NOT raise
+
+    rows = list(conn.execute(
+        "SELECT id, chain, status, score_state FROM calls WHERE channel_id=88"
+        ).fetchall())
+    byid = {r["id"]: r for r in rows} if isinstance(rows[0], dict) else {r[0]: r for r in rows}
+    assert wrong_id not in byid                    # mis-tagged row dropped
+    assert byid[true_id]["status"] == "win"        # verdict moved to true identity
+    assert byid[true_id]["chain"] == "eth"         # no rewrite needed — it was right
+
+
+def test_apply_eval7d_returns_effective_id_and_children_follow():
+    """Callers persist stoploss against the RETURNED id: on a normal write
+    that's the same row; on a chain-collision merge it's the twin — the
+    old (deleted) id would FK-crash persist_stoploss_result."""
+    import pipeline
+    from pricing.strategy7d import Eval7dResult
+    conn = pipeline.get_connection()
+    conn.execute("INSERT INTO channels (id, telegram_channel_id, username,"
+                 " title, window_start, window_end) VALUES (89, 9989,"
+                 " 'eff-test', 't', '2026-09-01T00:00:00', '2026-10-10T00:00:00')")
+    conn.commit()
+
+    def add(cid, chain):
+        conn.execute("""INSERT INTO calls (id, channel_id, chain, message_id,
+            raw_text, token_address, call_timestamp, status, is_win)
+            VALUES (?, 89, ?, 3, 'x', 'MINTBEE', '2026-10-02T00:00:00',
+            'pending', 0)""", (cid, chain))
+        conn.commit()
+        return cid
+
+    r7 = Eval7dResult(status_plain="loss", status_stoploss="loss",
+                      entry_price_usd=1e-4, max_price_usd=2e-4,
+                      max_multiple=2.0, pool_address="POOLB",
+                      note="", window_complete=True, evaluation_end_timestamp=None)
+    plain = add(601, "sol")
+    assert pipeline.apply_eval7d(plain, r7) == plain      # normal: same id
+
+    # collision: true-identity twin already exists
+    twin = add(602, "eth")
+    wrong = add(603, "robinhood")
+    r7c = Eval7dResult(status_plain="win", status_stoploss="win",
+                       entry_price_usd=1e-4, max_price_usd=4e-4,
+                       max_multiple=4.0, pool_address="POOLC",
+                       note="2x (birdeye eth)", window_complete=True,
+                       evaluation_end_timestamp=None, chain_corrected="eth")
+    eff = pipeline.apply_eval7d(wrong, r7c)
+    assert eff == twin                                    # verdict lands on twin
+    # children persist against the EFFECTIVE id — the old row no longer exists
+    br, sl = pipeline.eval7d_to_legacy_pair(r7c)
+    pipeline.persist_stoploss_result(eff, sl)             # must not raise
+    rows = {r["id"]: r for r in conn.execute(
+        "SELECT id, chain, status FROM calls WHERE channel_id=89").fetchall()}
+    assert wrong not in rows
+    assert rows[twin]["status"] == "win"
+    assert conn.execute("SELECT COUNT(*) n FROM stoploss_results WHERE call_id=?",
+                        (twin,)).fetchone()["n"] == 1

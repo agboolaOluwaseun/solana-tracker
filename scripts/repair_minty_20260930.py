@@ -50,15 +50,16 @@ ts = datetime.fromisoformat(str(row["call_timestamp"]).replace("Z", ""))
 res, sl, r7 = price_one_call(row["chain"], GeckoTerminalClient(), MINT, ts,
                              now=None, allow_birdeye=True)
 if r7 is not None:
-    apply_eval7d(row["id"], r7)
+    _eff = apply_eval7d(row["id"], r7)
     print("verdict:", r7.status_plain, "| sym:", r7.token_symbol,
           "| entry:", r7.entry_price_usd, "| peak:",
           round(r7.max_multiple or 0, 2), "x | note:", r7.note[:50])
 else:
+    _eff = row["id"]
     from pipeline import apply_backtest
     apply_backtest(55, row["id"], row["message_id"], res)
     print("legacy:", res.status)
-persist_stoploss_result(row["id"], sl)
+persist_stoploss_result(_eff, sl)
 conn.commit()
 
 print("\nafter:", dict(conn.execute("""SELECT message_id, substr(token_address,1,18) a,

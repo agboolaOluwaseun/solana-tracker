@@ -75,7 +75,7 @@ for mid, chain, addr, _ in RECOVER:
     res, sl, r7 = price_one_call(chain, client, addr, ts, now=None,
                                  allow_birdeye=True)
     if r7 is not None:
-        apply_eval7d(call_id, r7)
+        call_id = apply_eval7d(call_id, r7)
         print(f"  msg {mid} {addr[:14]}…: {r7.status_plain}"
               f" entry={r7.entry_price_usd} peak={round(r7.max_multiple or 0,2)}x"
               f" sym={r7.token_symbol} birdeye={'birdeye' in (r7.note or '')}")

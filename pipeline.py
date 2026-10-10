@@ -334,10 +334,11 @@ def mature_pending_calls(progress_cb: ProgressCb = _noop) -> int:
             result, sl_result = _unpriceable_pair(str(e))
             r7 = None
         if r7 is not None:
-            apply_eval7d(row["id"], r7)
+            _eff = apply_eval7d(row["id"], r7)
         else:
+            _eff = row["id"]
             apply_backtest(row["channel_id"], row["id"], 0, result)
-        persist_stoploss_result(row["id"], sl_result)
+        persist_stoploss_result(_eff, sl_result)
         priced += 1
         progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows), priced=priced))
     log.info("startup maturation: priced %d previously immature call(s)", priced)
@@ -471,11 +472,11 @@ def _rescore_pass_once(progress_cb: ProgressCb, limit: Optional[int]) -> int:
                     tc.execute("UPDATE calls SET score_state='final' "
                                "WHERE id = ?", (row["id"],))
                 continue
-            apply_eval7d(row["id"], r7)
-            persist_stoploss_result(row["id"], sl_result)
+            _eff = apply_eval7d(row["id"], r7)
+            persist_stoploss_result(_eff, sl_result)
         else:
-            apply_eval7d(row["id"], r7)
-            persist_stoploss_result(row["id"], sl_result)
+            _eff = apply_eval7d(row["id"], r7)
+            persist_stoploss_result(_eff, sl_result)
         updated += 1
         progress_cb(Progress(stage="price", scanned=i, total_calls=len(rows),
                              priced=updated, message=(
@@ -1040,14 +1041,66 @@ def eval7d_to_legacy_pair(r):
     return br, sl
 
 
-def apply_eval7d(call_id: int, r) -> None:
+def apply_eval7d(call_id: int, r) -> int:
     """Write the 7d result to the calls row in ONE upsert-safe UPDATE.
 
-    Legacy-compatible columns carry the PLAIN outcome (peak_* = full-window
-    max, peak_timestamp = time_2x); every inline 7d column is stored 1:1;
-    engine='7d', scored_window='7d'. Stoploss side persists through the
-    existing persist_stoploss_result(eval7d_to_legacy_pair(r)[1])."""
+    Returns the EFFECTIVE call id — normally the one passed in, but on a
+    chain-collision merge (see guard below) the verdict lands on the
+    true-identity twin, and callers MUST persist the stoploss/trail children
+    against THAT id (the passed row is deleted). Legacy-compatible columns
+    carry the PLAIN outcome (peak_* = full-window max, peak_timestamp =
+    time_2x); every inline 7d column is stored 1:1; engine='7d',
+    scored_window='7d'. Stoploss side persists through the existing
+    persist_stoploss_result(eval7d_to_legacy_pair(r)[1])."""
     peak_pct = (r.max_multiple - 1.0) * 100.0 if r.max_multiple else None
+
+    # Chain-collision guard (thecallercrosschain incident, user 2026-10-10):
+    # a Birdeye rescue that corrects the stored chain rewrites chain =
+    # COALESCE(?, chain). If a row of the TRUE identity already exists
+    # (channel, corrected chain, same message+token — e.g. a re-run pass
+    # inserted the twin before this mis-tagged row was rescued), the
+    # rewrite hits UNIQUE(channel_id, chain, message_id, token_address)
+    # and the IntegrityError aborts the ENTIRE pricing loop mid-channel —
+    # exactly what left ch68 stuck at call #51/186. Resolution: the twin
+    # is the row that should carry the verdict (it has the right chain);
+    # apply there and delete the mis-tagged row with its verdict children.
+    corrected = getattr(r, "chain_corrected", None)
+    if corrected:
+        me = get_connection().execute(
+            "SELECT channel_id, message_id, token_address, chain FROM calls "
+            "WHERE id = ?", (call_id,)).fetchone()
+        if me and me["chain"] != corrected:
+            twin = get_connection().execute(
+                "SELECT id FROM calls WHERE channel_id = ? AND chain = ? "
+                "AND message_id = ? AND token_address = ? AND id != ?",
+                (me["channel_id"], corrected, me["message_id"],
+                 me["token_address"], call_id)).fetchone()
+            if twin is not None:
+                wrong_id = call_id
+                with transaction() as conn:
+                    call_id = twin["id"]   # verdict lands on the true identity
+                    _delete_verdict_children(conn, "?", [twin["id"]])
+                    conn.execute("DELETE FROM stoploss_results WHERE call_id = ?",
+                                 (twin["id"],))
+                    conn.execute("DELETE FROM trailing_results WHERE call_id = ?",
+                                 (twin["id"],))
+                log.info("apply_eval7d: chain-collision — verdict moved to twin %s,"
+                         " mis-tagged row %s dropped", twin["id"], wrong_id)
+                # fall through: the UPDATE below now targets the twin; the
+                # mis-tagged row must go too (children first — FK rule).
+                with transaction() as conn:
+                    dead = get_connection().execute(
+                        "SELECT id FROM calls WHERE channel_id = ? AND chain != ? "
+                        "AND message_id = ? AND token_address = ? AND id != ?",
+                        (me["channel_id"], corrected, me["message_id"],
+                         me["token_address"], twin["id"])).fetchall()
+                    for d in dead:
+                        conn.execute("DELETE FROM stoploss_results WHERE call_id = ?",
+                                     (d["id"],))
+                        conn.execute("DELETE FROM trailing_results WHERE call_id = ?",
+                                     (d["id"],))
+                        conn.execute("DELETE FROM calls WHERE id = ?", (d["id"],))
+
     with transaction() as conn:
         conn.execute(
             """
@@ -1132,6 +1185,7 @@ def apply_eval7d(call_id: int, r) -> None:
         except Exception:  # noqa: BLE001 — never break the main persist
             log.exception("embedded trailing persist failed for call %s",
                           call_id)
+    return call_id
 
 
 def score_state_7d(r) -> str:
@@ -1885,10 +1939,11 @@ def run_backfill(
             # Birdeye retry could price.
             if getattr(r7, "chain_corrected", None) or "birdeye" in (r7.note or ""):
                 birdeye_saved += 1
-            apply_eval7d(row["id"], r7)
+            _eff = apply_eval7d(row["id"], r7)
         else:
+            _eff = row["id"]
             apply_backtest(channel_id, row["id"], row["message_id"], result)
-        persist_stoploss_result(row["id"], sl_result)
+        persist_stoploss_result(_eff, sl_result)
         if r7 is not None and not r7.window_complete:
             live += 1  # provisional verdict; will be rescored toward final
 
@@ -2100,10 +2155,11 @@ def reprice_calls(
             mark_waiting_7d(row["id"])
             continue
         if r7 is not None:
-            apply_eval7d(row["id"], r7)
+            _eff = apply_eval7d(row["id"], r7)
         else:
+            _eff = row["id"]
             apply_backtest(channel_id, row["id"], row["message_id"], result)
-        persist_stoploss_result(row["id"], sl_result)
+        persist_stoploss_result(_eff, sl_result)
 
         if result.status == "unpriceable_loss":
             unpriceable += 1

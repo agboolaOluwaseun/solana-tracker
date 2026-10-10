@@ -27,7 +27,7 @@ from starlette.routing import Route
 import asyncio
 import json
 
-from db import init_db, get_connection
+from db import init_db, get_connection, transaction
 from analysis import windowed as W
 
 init_db()
@@ -48,6 +48,15 @@ from contextlib import asynccontextmanager
 async def _lifespan(app):
     def _worker():
         try:
+            # Headless fetch-resume fallback (user rule 2026-10-10): rows
+            # older than 10 min mean nobody reopened the app to resume them
+            # visibly — finish them here BEFORE any startup catch-up or
+            # refresh. Fresh rows are left for the frontend (visible cards).
+            try:
+                resume_fetch_queue_sync(max_age_minutes=10)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("headless fetch resume failed")
             from pipeline import mature_pending_calls, rescore_live_calls
             mature_pending_calls()
             # Visibility ruling (user 2026-10-06): when the daily boot
@@ -527,6 +536,16 @@ async def fetch_stream(request: Request):
             # stream ends (including client disconnect — the generator's
             # finally runs on cancellation).
             request_telegram_yield(True)
+            # Register the WHOLE list up front: channels that never got
+            # their turn before the stream died must resume too. Resolve
+            # to the DB row id (clients may send the telegram id — the
+            # queue FK requires the real primary key).
+            for _cid in channel_ids:
+                _r = conn.execute(
+                    "SELECT id FROM channels WHERE id = ? OR telegram_channel_id = ?",
+                    (_cid, _cid)).fetchone()
+                if _r:
+                    _fetch_queue_add(_r["id"], days)
             try:
                 async for chunk in _fetch_stream_inner(channel_ids, days, conn):
                     yield chunk
@@ -537,6 +556,97 @@ async def fetch_stream(request: Request):
     
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+def _fetch_queue_add(channel_id: int, days) -> None:
+    """Remember an in-flight manual fetch. Rows are deleted per-channel on
+    done/error; a client disconnect or server kill leaves the row — which
+    is exactly the resume marker the next launch consumes (user rule
+    2026-10-10: interrupted fetch continues where it stopped, as visible
+    cards, BEFORE the usual startup refresh)."""
+    with transaction() as c:
+        c.execute("""INSERT OR REPLACE INTO fetch_queue (channel_id, requested_at, days)
+            VALUES (?, datetime('now'), ?)""", (channel_id, days))
+
+
+def _fetch_queue_drop(channel_id: int) -> None:
+    with transaction() as c:
+        c.execute("DELETE FROM fetch_queue WHERE channel_id = ?", (channel_id,))
+
+
+def _fetch_queue_list():
+    with get_connection() as c:
+        return c.execute("""SELECT fq.channel_id, fq.days, ch.title
+            FROM fetch_queue fq JOIN channels ch ON ch.id = fq.channel_id
+            ORDER BY fq.requested_at""").fetchall()
+
+
+def pending_fetches(request):
+    """GET /api/pending-fetches — interrupted manual fetches still queued
+    (user rule 2026-10-10): the frontend boots with these FIRST, re-renders
+    their cards with the spinner, and resumes the fetch (INSERT OR IGNORE
+    skips stored rows, the pricing lane takes exactly the still-pending
+    ones = 'from where it stopped'), BEFORE the usual startup refresh."""
+    try:
+        return _j([{"channel_id": r["channel_id"], "title": r["title"],
+                    "days": r["days"]}
+                   for r in _fetch_queue_list()])
+    except Exception as e:  # pragma: no cover
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def resume_fetch_queue_sync(max_age_minutes: int | None = None) -> list:
+    """Replay queued interrupted fetches in THIS thread. Used by the
+    lifespan fallback for rows nobody is watching: a server restart with
+    the app never reopened still finishes the fetch (user rule
+    2026-10-10 'fetch should continue from where it stopped'). Rows are
+    dropped BEFORE the work starts (consume-once), so a frontend resume
+    opening right behind this sees an empty queue and won't double-run.
+    Returns the channel ids replayed."""
+    import logging
+    from datetime import datetime, timedelta, timezone
+    from pipeline import pause_rescoring, run_backfill, preset_window
+    from ingestion.telegram_guard import request_telegram_yield
+
+    log_ = logging.getLogger("api.resume")
+    with get_connection() as c:
+        rows = c.execute("SELECT channel_id, days, requested_at FROM fetch_queue").fetchall()
+    if max_age_minutes is not None:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=max_age_minutes)
+        rows = [r for r in rows
+                if r["requested_at"] and
+                datetime.fromisoformat(str(r["requested_at"])) <= cutoff]
+    if not rows:
+        return []
+    done_ids = []
+    request_telegram_yield(True)     # resume outranks the refresh like a user fetch
+    try:
+        for r in rows:
+            _fetch_queue_drop(r["channel_id"])       # consume once, whatever happens
+            done_ids.append(r["channel_id"])
+            row = get_connection().execute(
+                "SELECT telegram_channel_id, username, title FROM channels WHERE id = ?",
+                (r["channel_id"],)).fetchone()
+            if not row:
+                continue
+            ref = f"@{row['username']}" if row["username"] else str(row["telegram_channel_id"])
+            if r["days"]:
+                we = datetime.now(timezone.utc).replace(tzinfo=None)
+                ws = we - timedelta(days=int(r["days"]))
+            else:
+                ws, we = preset_window("5m")
+            log_.info("resuming interrupted fetch (headless) for %s", row["title"])
+            try:
+                with pause_rescoring():
+                    run_backfill(channel_ref=ref, window_start=ws, window_end=we,
+                                 title=row["title"], username=row["username"],
+                                 birdeye_rescue=True)
+            except Exception:
+                log_.exception("headless resume failed for %s — next launch retries",
+                               row["title"])
+    finally:
+        request_telegram_yield(False)
+    return done_ids
 
 
 async def _fetch_stream_inner(channel_ids, days, conn):
@@ -564,6 +674,11 @@ async def _fetch_stream_inner(channel_ids, days, conn):
 
         # Send start event
         yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'start', 'title': row['title']})}\n\n"
+        # consume this channel's resume marker as its turn starts: a stream
+        # that dies mid-channel leaves only the NOT-YET-STARTED channels in
+        # the queue (a half-priced channel completes via the boot scan —
+        # it was never done-marked, and boot-scan pricing takes all pending)
+        _fetch_queue_drop(row["id"])
 
         # Calculate window: the STANDARD 5-month anchor (same start
         # as the historical backfill preset), unless the client sends
@@ -647,8 +762,10 @@ async def _fetch_stream_inner(channel_ids, days, conn):
         # Get final result
         result = await task
         if isinstance(result, Exception):
+            _fetch_queue_drop(row["id"])
             yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'error', 'message': str(result)})}\n\n"
         else:
+            _fetch_queue_drop(row["id"])
             yield f"data: {json.dumps({'channel_id': row['id'], 'status': 'done', 'total_calls': result.total_calls})}\n\n"
 
     # Before finishing: refresh every provisional 'live' verdict
@@ -1215,6 +1332,7 @@ app_routes = [
     Route("/api/fetch-stream", fetch_stream, methods=["POST"]),
     Route("/api/refresh-stream", refresh_stream, methods=["POST"]),
     Route("/api/fetch", fetch_channels, methods=["POST"]),
+    Route("/api/pending-fetches", pending_fetches),
     Route("/api/telegram-channels", telegram_channels),
     Route("/api/add-channels", add_channels, methods=["POST"]),
 ]

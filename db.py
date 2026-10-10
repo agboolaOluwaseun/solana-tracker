@@ -85,6 +85,18 @@ def init_db() -> None:
     # the newest point up to which that run's FETCH phase walked messages
     # (pricing happens after the scan, so started_at never over-promises
     # coverage). NULL = never scanned; refresh falls back to the old anchor.
+    # Interrupted-fetch resume queue (user rule 2026-10-10): a manual fetch
+    # whose stream died (client gone / server restarted) leaves its rows —
+    # deleted when the server completes OR terminal-errors a channel, kept
+    # for the next launch otherwise. Lifespan resumes them BEFORE anything
+    # else; the frontend re-attaches a live stream so the cards show the
+    # spinner again.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fetch_queue (
+            channel_id   INTEGER PRIMARY KEY REFERENCES channels(id),
+            requested_at TEXT NOT NULL,
+            days         INTEGER
+        )""")
     ch_cols = {r["name"] for r in conn.execute("PRAGMA table_info(channels)").fetchall()}
     if "last_scanned_at" not in ch_cols:
         conn.execute("ALTER TABLE channels ADD COLUMN last_scanned_at TEXT")

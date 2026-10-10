@@ -96,14 +96,15 @@ for mid, addr in RECOVER:
     res, sl, r7 = price_one_call(chain, client, addr, tts, now=None,
                                  allow_birdeye=True)
     if r7 is not None:
-        apply_eval7d(row["id"], r7)
+        _eff = apply_eval7d(row["id"], r7)
         print(f"  msg {mid} [{chain}] {addr[:12]}…: {r7.status_plain} "
               f"sym={r7.token_symbol!r} peak={round(r7.max_multiple or 0,2)}x "
               f"birdeye={'birdeye' in (r7.note or '')}")
     else:
+        _eff = row["id"]
         apply_backtest(58, row["id"], mid, res)
         print(f"  msg {mid}: legacy {res.status}")
-    persist_stoploss_result(row["id"], sl)
+    persist_stoploss_result(_eff, sl)
 
 print("\n== retry unpriceable 6429 ==")
 for mid, chain, addr in RETRY:
@@ -113,8 +114,8 @@ for mid, chain, addr in RETRY:
     res, sl, r7 = price_one_call(chain, client, addr, tts, now=None,
                                  allow_birdeye=True)
     if r7 is not None and r7.status_plain != "unpriceable_loss":
-        apply_eval7d(row["id"], r7)
-        persist_stoploss_result(row["id"], sl)
+        _eff = apply_eval7d(row["id"], r7)
+        persist_stoploss_result(_eff, sl)
         print(f"  6429 now priced: {r7.status_plain} sym={r7.token_symbol!r}")
     else:
         print("  6429 still unpriceable (honest — GT/DS/Birdeye all blind)")

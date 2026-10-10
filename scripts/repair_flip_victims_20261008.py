@@ -69,7 +69,7 @@ for e in VICTIMS:
     if r7 is None:
         print("   !! legacy result — leaving pending for next pass")
         continue
-    apply_eval7d(cid, r7)
+    cid = apply_eval7d(cid, r7)
     persist_stoploss_result(cid, sl)
     fin = conn.execute("""SELECT status, score_state, round(peak_multiple,2) pk,
         round(entry_price_usd,10) ent, substr(COALESCE(note,''),1,36) note,
