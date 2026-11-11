@@ -4,7 +4,7 @@
 
 export type TimeWindow = "1d" | "7d" | "1m" | "3m" | "all";
 export type Strategy = "50" | "100" | "trail";  // 50 = -50% fixed stop; 100 = normal (2x); trail = 50% trailing stop
-export type Chain = "sol" | "robinhood" | "eth" | "bsc" | "base" | "arc" | "all";
+export type Chain = "sol" | "robinhood" | "eth" | "bsc" | "base" | "arc" | "elysium" | "all";
 export type ChannelTab = "All" | "Hot" | "Consistent" | "New";
 
 export interface ChannelCardData {

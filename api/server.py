@@ -97,7 +97,7 @@ def _chain(request, default: str = "all") -> str | None:
     ARE the per-chain stats. Keeps old API clients unbroken on both DBs.
     """
     v = request.query_params.get("chain", default)
-    if v not in ("sol", "robinhood", "eth", "bsc", "base", "arc", "all"):
+    if v not in ("sol", "robinhood", "eth", "bsc", "base", "arc", "elysium", "all"):
         v = default
     if v == "all" or not _unified():
         return None

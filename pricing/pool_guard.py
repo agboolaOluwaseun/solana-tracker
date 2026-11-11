@@ -51,6 +51,7 @@ SAFE_QUOTES = {
     "bsc": {"BNB", "WBNB", "USDC", "USDT", "CAKE"},
     "base": {"ETH", "WETH", "USDC", "cbBTC", "DEGEN", "AERO"},
     "arc": {"USDC", "ARC", "WETH", "ETH"},
+    "elysium": {"HYPE", "WHYPE", "USDC", "USDT", "ELYS", "WELYS"},
 }
 # A generalised fallback set so a symbol we never saw degrades to "exotic"
 # (safer: pays one cached confirm call) rather than silently trusted.

@@ -24,7 +24,7 @@ from models import PricePoint
 # GT network slug -> internal chain slug (calls.chain namespace)
 NETWORK_TO_CHAIN = {"solana": "sol", "robinhood": "robinhood", "eth": "eth",
                     "ethereum": "eth", "bsc": "bsc", "base": "base",
-                    "arc": "arc"}
+                    "arc": "arc", "elysium": "elysium"}
 
 AGG_MIN = {"minute", "1m", "1"}      # GT has used several spellings
 AGG_HOUR = {"hour", "2h", "4h"}

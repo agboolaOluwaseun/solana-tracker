@@ -17,6 +17,7 @@ const OPTIONS: MenuOption[] = [
   { value: "bsc", label: "BSC" },
   { value: "base", label: "Base" },
   { value: "arc", label: "Arc" },
+  { value: "elysium", label: "Elysium" },
 ];
 
 export default function ChainToggle({ deepDive = false }: { deepDive?: boolean }) {

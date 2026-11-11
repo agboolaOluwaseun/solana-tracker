@@ -18,7 +18,8 @@ DS_CHAIN_MAP = {
     "eth": "ethereum",
     "bsc": "bsc",
     "base": "base",
-    "arc": "arc"
+    "arc": "arc",
+    "elysium": "elysium",
 }
 
 # URL patterns for chain detection
@@ -45,6 +46,10 @@ CHAIN_URL_PATTERNS = {
         r"dexscreener\.com/arc/",
         r"arcscan\.app",
         r"gmgn\.ai/arc/",
+    ],
+    "elysium": [
+        r"dexscreener\.com/elysium/",
+        r"geckoterminal\.com/(?:dex-pools/networks|networks)/elysium",
     ],
     "robinhood": [
         r"dexscreener\.com/robinhood/",
@@ -73,6 +78,9 @@ CHAIN_TAG_PATTERNS = {
     ],
     "arc": [
         r"\b(Arc|Arc\s*Chain|Circle\s*Arc)\s*[:\-]\s*",
+    ],
+    "elysium": [
+        r"\b(Elysium|Elysium\s*(?:Chain|Mainnet))\s*[:\-]\s*",
     ],
     "robinhood": [
         r"\b(Robinhood|RH)\s*[:\-]\s*",

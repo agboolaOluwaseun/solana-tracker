@@ -941,7 +941,7 @@ def run_trailing_backfill(progress_cb: ProgressCb = _noop,
 
 # ---- Engine dispatcher (Workstream C) --------------------------------------
 
-_DS_CHAIN = {"sol": "solana", "robinhood": "robinhood", "eth": "ethereum", "bsc": "bsc", "base": "base", "arc": "arc"}
+_DS_CHAIN = {"sol": "solana", "robinhood": "robinhood", "eth": "ethereum", "bsc": "bsc", "base": "base", "arc": "arc", "elysium": "elysium"}
 _v2_clients: dict = {}
 _ds_client = None
 
@@ -973,7 +973,8 @@ def _get_v2_client(chain: str):
         "eth": "eth",
         "bsc": "bsc",
         "base": "base",
-        "arc": "arc"
+        "arc": "arc",
+        "elysium": "elysium",
     }
     
     net = chain_to_network.get(chain, chain)  # Default to chain name if not in mapping
@@ -2215,18 +2216,49 @@ def reprice_calls(
     return progress
 
 
+def purge_orphaned_token_data(conn) -> tuple[int, int]:
+    """
+    Delete token_meta + price_cache rows for tokens no remaining call references.
+
+    Channel-agnostic by design: a token is purged only when ZERO calls in the
+    whole DB still use its address (or the address its pool resolves to).
+    Tokens shared with surviving channels keep their cache.
+
+    Must run AFTER the target calls have been deleted, inside the same
+    transaction. Returns (meta_deleted, cache_deleted).
+    """
+    meta_before = conn.execute("SELECT COUNT(*) AS n FROM token_meta").fetchone()["n"]
+    cache_before = conn.execute("SELECT COUNT(*) AS n FROM price_cache").fetchone()["n"]
+
+    live_tokens = """
+        SELECT DISTINCT token_address FROM calls
+        UNION
+        SELECT tm.address FROM token_meta tm
+        WHERE tm.dex_pool_id IN (SELECT DISTINCT token_address FROM calls)
+    """
+    conn.execute(f"DELETE FROM token_meta WHERE address NOT IN ({live_tokens})")
+    conn.execute(f"DELETE FROM price_cache WHERE token_address NOT IN ({live_tokens})")
+
+    meta_deleted = meta_before - conn.execute("SELECT COUNT(*) AS n FROM token_meta").fetchone()["n"]
+    cache_deleted = cache_before - conn.execute("SELECT COUNT(*) AS n FROM price_cache").fetchone()["n"]
+    return meta_deleted, cache_deleted
+
+
 def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
     """
     Delete all calls and ingestion runs for a channel.
 
     If delete_channel=True, also removes the channel row itself.
+    Either way, tokens that no other remaining call references are purged
+    from token_meta and price_cache (shared tokens are kept).
     Returns a summary dict with deletion counts.
     """
     init_db()
-    summary = {"calls_deleted": 0, "runs_deleted": 0, "stoploss_deleted": 0, "channel_deleted": False}
+    summary = {"calls_deleted": 0, "runs_deleted": 0, "stoploss_deleted": 0, "trailing_deleted": 0,
+               "meta_purged": 0, "cache_purged": 0, "channel_deleted": False}
 
     with transaction() as conn:
-        # Delete stoploss_results first (references calls)
+        # Delete child-of-calls tables first (stoploss_results, trailing_results)
         count = conn.execute(
             "SELECT COUNT(*) AS n FROM stoploss_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
             (channel_id,)
@@ -2234,6 +2266,16 @@ def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
         summary["stoploss_deleted"] = count["n"] if count else 0
         conn.execute(
             "DELETE FROM stoploss_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
+            (channel_id,)
+        )
+
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM trailing_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
+            (channel_id,)
+        ).fetchone()
+        summary["trailing_deleted"] = count["n"] if count else 0
+        conn.execute(
+            "DELETE FROM trailing_results WHERE call_id IN (SELECT id FROM calls WHERE channel_id = ?)",
             (channel_id,)
         )
 
@@ -2251,14 +2293,23 @@ def delete_channel_data(channel_id: int, delete_channel: bool = False) -> dict:
         summary["runs_deleted"] = count["n"] if count else 0
         conn.execute("DELETE FROM ingestion_runs WHERE channel_id = ?", (channel_id,))
 
-        # Finally delete the channel itself
+        # Finally delete the channel itself (plus its queue/boot bookkeeping rows)
         if delete_channel:
+            conn.execute("DELETE FROM fetch_queue WHERE channel_id = ?", (channel_id,))
+            conn.execute("DELETE FROM boot_refresh_channels WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
             summary["channel_deleted"] = True
 
+        # Purge token_meta / price_cache for tokens no remaining call uses
+        m, pc = purge_orphaned_token_data(conn)
+        summary["meta_purged"] = m
+        summary["cache_purged"] = pc
+
     log.info(
-        "deleted channel %d data: %d calls, %d runs, %d stoploss, channel=%s",
-        channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["stoploss_deleted"], summary["channel_deleted"],
+        "deleted channel %d data: %d calls, %d runs, %d stoploss, %d trailing, "
+        "purged %d meta + %d cache rows, channel=%s",
+        channel_id, summary["calls_deleted"], summary["runs_deleted"], summary["stoploss_deleted"],
+        summary["trailing_deleted"], m, pc, summary["channel_deleted"],
     )
     return summary
 
@@ -2271,26 +2322,42 @@ def delete_calls_by_status(channel_id: int, statuses: list[str]) -> dict:
     Returns a summary dict with deletion count.
     """
     init_db()
-    summary = {"calls_deleted": 0}
+    summary = {"calls_deleted": 0, "meta_purged": 0, "cache_purged": 0}
 
     if not statuses:
         return summary
 
-    placeholders = ",".join("?" * len(statuses))
+    placeholders = ", ".join("?" * len(statuses))
     with transaction() as conn:
         count = conn.execute(
             f"SELECT COUNT(*) AS n FROM calls WHERE channel_id = ? AND status IN ({placeholders})",
             [channel_id, *statuses],
         ).fetchone()
         summary["calls_deleted"] = count["n"] if count else 0
+        # Delete child rows first (stoploss_results, trailing_results reference calls)
+        conn.execute(
+            f"DELETE FROM stoploss_results WHERE call_id IN "
+            f"(SELECT id FROM calls WHERE channel_id = ? AND status IN ({placeholders}))",
+            [channel_id, *statuses],
+        )
+        conn.execute(
+            f"DELETE FROM trailing_results WHERE call_id IN "
+            f"(SELECT id FROM calls WHERE channel_id = ? AND status IN ({placeholders}))",
+            [channel_id, *statuses],
+        )
         conn.execute(
             f"DELETE FROM calls WHERE channel_id = ? AND status IN ({placeholders})",
             [channel_id, *statuses],
         )
 
+        # Purge token_meta / price_cache for tokens no remaining call uses
+        m, pc = purge_orphaned_token_data(conn)
+        summary["meta_purged"] = m
+        summary["cache_purged"] = pc
+
     log.info(
-        "deleted %d calls for channel %d (statuses: %s)",
-        summary["calls_deleted"], channel_id, statuses,
+        "deleted %d calls for channel %d (statuses: %s), purged %d meta + %d cache rows",
+        summary["calls_deleted"], channel_id, statuses, m, pc,
     )
     return summary
 

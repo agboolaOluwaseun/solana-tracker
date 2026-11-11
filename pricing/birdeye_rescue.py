@@ -48,6 +48,9 @@ log = logging.getLogger(__name__)
 # Birdeye chain slugs we probe (order = cheap-first when the stored tag is
 # already EVM: probe the tagged chain first, then the others).
 EVM_CHAINS = ("bsc", "base", "ethereum", "robinhood")
+#: internal slugs Birdeye answers "Chain X is not supported yet" —
+#: find_chain must not burn one probe per EVM chain on such mints.
+_BIRDEYE_UNSUPPORTED = frozenset({"elysium"})
 TO_INTERNAL = {"bsc": "bsc", "base": "base", "ethereum": "eth",
                "robinhood": "robinhood", "solana": "sol"}
 # Max weekly-close spread an honest 7-day window may show before the rescue
@@ -151,6 +154,14 @@ def find_chain(addr: str, our_chain: str) -> Optional[str]:
         complete = hit is not None
     else:
         internal = our_chain
+        # Chains Birdeye will never serve (elysium — user 2026-11-05: API
+        # answers 'Chain elysium is not supported yet'): an elysium-native
+        # mint cannot exist on the probed EVM chains either, so skip the
+        # 4 wasted CU probes and cache the miss. GT indexes elysium quickly,
+        # so the real healing lane for such rows is the next rescore.
+        if internal in _BIRDEYE_UNSUPPORTED:
+            _chain_cache[addr] = None
+            return None
         external = {"bsc": "bsc", "base": "base", "eth": "ethereum",
                     "ethereum": "ethereum", "robinhood": "robinhood"}.get(internal)
         order = [c for c in EVM_CHAINS if c == external] \

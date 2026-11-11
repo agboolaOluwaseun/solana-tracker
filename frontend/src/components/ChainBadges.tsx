@@ -14,8 +14,9 @@ const LABEL: Record<string, string> = {
   bsc: "BSC",
   base: "BASE",
   arc: "ARC",
+  elysium: "ELYSIUM",
 };
-const ORDER = ["sol", "robinhood", "eth", "bsc", "base", "arc"];
+const ORDER = ["sol", "robinhood", "eth", "bsc", "base", "arc", "elysium"];
 
 export default function ChainBadges({
   chains,

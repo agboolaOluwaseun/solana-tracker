@@ -57,9 +57,9 @@ _BARE_URL_RE = re.compile(r"https?://\S+")
 # DELIBERATELY NOT allowlisted — those embed WALLET addresses, not tokens.)
 _DEX_URL_RE = re.compile(
     r"""https?://[^\s"']*(?:
-          dexscreener\.(?:com|io)/(?:robinhood|arc|bsc|base|eth(?:ereum)?)
-        | geckoterminal\.com/dex-pools/networks/(?:robinhood|arc)
-        | geckoterminal\.com/networks/(?:robinhood|arc)
+          dexscreener\.(?:com|io)/(?:robinhood|arc|bsc|base|eth(?:ereum)?|elysium)
+        | geckoterminal\.com/dex-pools/networks/(?:robinhood|arc|elysium)
+        | geckoterminal\.com/networks/(?:robinhood|arc|elysium)
         | gate\.com/alpha/robinhood-
         | explorer\.robinhood\.com/(?:address|token)
         | arcscan\.app

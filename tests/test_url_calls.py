@@ -256,3 +256,23 @@ def test_debank_wallet_profile_is_not_a_call():
     spike = "0xdbed41aaeb80854a2a744a60d9c721f0580e67e6"
     text = "50,000$ buy on $SPIKE\n\nhttps://debank.com/profile/" + spike
     assert rh_addrs(text) == []
+
+
+def test_elysium_urls_and_tag_route_to_elysium():
+    # (user 2026-11-05: new chain Elysium — GT+DS supported, Birdeye is not.)
+    from chains.chain_detector import detect_chain, detect_chain_from_context
+    tok = "0x4324301c2Cd219DD7B5Ff8FD72D1C83C4287FB59"
+    t1 = f"ELYSIUM on elysium\n\nhttps://dexscreener.com/elysium/{tok}"
+    assert rh_addrs(t1) == [tok.lower()], "dexscreener elysium path must allowlist"
+    assert detect_chain_from_context(t1, tok) == "elysium"
+    t2 = "Elysium: " + tok + " low cap gem"
+    assert detect_chain_from_context(t2, tok) == "elysium", "explicit tag"
+    t3 = "https://geckoterminal.com/networks/elysium/pools/0x8b3bcaf3"
+    assert detect_chain_from_context(t3, tok) == "elysium"
+
+
+def test_elysium_bare_0x_still_defaults_per_spec():
+    # no context, no DS-visible pair for a fake addr -> legacy fallback
+    from chains.chain_detector import detect_chain_from_context
+    fake = "0x1111111111111111111111111111111111111111"
+    assert detect_chain_from_context("just aped this " + fake, fake) is None
