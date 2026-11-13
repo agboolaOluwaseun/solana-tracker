@@ -80,9 +80,11 @@ export default function ChannelCard({ channel, index }: ChannelCardProps) {
         {channel.title}
       </h3>
 
-      {/* Chain pills: their OWN row, fixed height, centered — can never
-          interleave with the title or push anything sideways. */}
-      <div className="flex h-5 items-center justify-center overflow-hidden">
+      {/* Chain pills: their OWN row — grows to 2 lines when a channel
+          spans many chains (ELYSIUM made 7 pills wrap; fixed h-5 +
+          overflow-hidden clipped them into an overlapping mush — user
+          report 2026-11-13). min-h preserves single-line baseline. */}
+      <div className="flex min-h-5 flex-wrap items-center justify-center gap-y-1">
         {globalChain === "all" && <ChainBadges chains={channel.chains} />}
       </div>
 
