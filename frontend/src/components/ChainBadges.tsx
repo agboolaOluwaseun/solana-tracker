@@ -14,7 +14,7 @@ const LABEL: Record<string, string> = {
   bsc: "BSC",
   base: "BASE",
   arc: "ARC",
-  elysium: "ELYSIUM",
+  elysium: "ELY",
 };
 const ORDER = ["sol", "robinhood", "eth", "bsc", "base", "arc", "elysium"];
 

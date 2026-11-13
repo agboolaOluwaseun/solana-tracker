@@ -81,9 +81,11 @@ export default function ChannelCard({ channel, index }: ChannelCardProps) {
       </h3>
 
       {/* Chain pills: their OWN row — grows to 2 lines when a channel
-          spans many chains (ELYSIUM made 7 pills wrap; fixed h-5 +
-          overflow-hidden clipped them into an overlapping mush — user
-          report 2026-11-13). min-h preserves single-line baseline. */}
+          spans many chains (7 pills with the long ELYSIUM label wrapped;
+          fixed h-5 + overflow-hidden then clipped them into mush — user
+          report 2026-11-13; label since shortened to ELY per user, and
+          the zone now grows for any future long/extra chain anyway).
+          min-h preserves single-line baseline. */}
       <div className="flex min-h-5 flex-wrap items-center justify-center gap-y-1">
         {globalChain === "all" && <ChainBadges chains={channel.chains} />}
       </div>

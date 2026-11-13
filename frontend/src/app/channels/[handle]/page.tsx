@@ -238,7 +238,7 @@ export default function ChannelDeepdivePage() {
                   {/* Tiny chain chip — only when the page spans multiple chains */}
                   {deepDiveChain === "all" && call.chain && (
                     <span className="shrink-0 rounded border border-[var(--border-subtle)] px-1 py-px text-[9px] font-bold uppercase leading-none text-[var(--text-muted)]">
-                      {{ sol: "SOL", robinhood: "RH", eth: "ETH", bsc: "BSC", base: "BASE", arc: "ARC", elysium: "ELYSIUM" }[call.chain] ?? call.chain}
+                      {{ sol: "SOL", robinhood: "RH", eth: "ETH", bsc: "BSC", base: "BASE", arc: "ARC", elysium: "ELY" }[call.chain] ?? call.chain}
                     </span>
                   )}
                 </h3>
